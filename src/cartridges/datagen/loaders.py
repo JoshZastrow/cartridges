@@ -24,8 +24,12 @@ def split_markdown_pages(markdown: str) -> list[str]:
     ]
 
 
+def sanitize_page_text(text: str) -> str:
+    return re.sub(r"(?m)^\s*---\s*$", "- - -", text.strip())
+
+
 def format_pdf_page(page_number: int, text: str, date: str = "unknown") -> str:
-    return f"## p. {page_number} - date: {date}\n\n{text.strip()}\n"
+    return f"## p. {page_number} - date: {date}\n\n{sanitize_page_text(text)}\n"
 
 
 def pdf_page_count(path: Path) -> int:
