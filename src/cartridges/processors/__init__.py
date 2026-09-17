@@ -8,6 +8,8 @@ from cartridges.processors.ocr import (
     OcrEngine,
     create_ocr_engine,
     ocr_image,
+    pdf_page_count,
+    pdf_page_to_image,
     pdf_to_images,
     transcribe_image,
 )
@@ -20,6 +22,8 @@ __all__ = [
     "OcrEngine",
     "create_ocr_engine",
     "ocr_image",
+    "pdf_page_count",
+    "pdf_page_to_image",
     "pdf_to_images",
     "transcribe_image",
 ]

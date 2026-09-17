@@ -107,18 +107,35 @@ class OcrEngine(Protocol):
         """Return recognized text for a single page image."""
 
 
-def pdf_to_images(pdf_path: Path, dpi: int = 400) -> list[Image.Image]:
+def pdf_page_to_image(pdf_path: Path, page_number: int, dpi: int = 250) -> Image.Image:
     import fitz  # pymupdf
     from PIL import Image
 
     doc = fitz.open(pdf_path)
-    zoom = dpi / 72
-    matrix = fitz.Matrix(zoom, zoom)
     try:
-        return [
-            Image.open(io.BytesIO(page.get_pixmap(matrix=matrix).tobytes("png")))
-            for page in doc
-        ]
+        if not (1 <= page_number <= len(doc)):
+            raise ValueError(f"page_number must be 1..{len(doc)}")
+        zoom = dpi / 72
+        matrix = fitz.Matrix(zoom, zoom)
+        page = doc[page_number - 1]
+        return Image.open(io.BytesIO(page.get_pixmap(matrix=matrix).tobytes("png")))
+    finally:
+        doc.close()
+
+
+def pdf_to_images(pdf_path: Path, dpi: int = 250) -> list[Image.Image]:
+    return [
+        pdf_page_to_image(pdf_path, page_number, dpi=dpi)
+        for page_number in range(1, pdf_page_count(pdf_path) + 1)
+    ]
+
+
+def pdf_page_count(pdf_path: Path) -> int:
+    import fitz  # pymupdf
+
+    doc = fitz.open(pdf_path)
+    try:
+        return len(doc)
     finally:
         doc.close()
 

@@ -6,25 +6,44 @@ unstructured vs. custom). Fill these in once that's decided.
 
 from pathlib import Path
 
-from cartridges.processors.ocr import OCR_ENGINE_KINDS, pdf_to_images, transcribe_image
+from cartridges.processors.ocr import (
+    OCR_ENGINE_KINDS,
+    pdf_page_count as _pdf_page_count,
+    pdf_page_to_image,
+    pdf_to_images,
+    transcribe_image,
+)
 
 
 def split_markdown_pages(markdown: str) -> list[str]:
     return [section.strip() for section in markdown.split("---") if section.strip()]
 
 
-def pdf_page_count(path: Path) -> int:
-    import fitz  # pymupdf
-
-    doc = fitz.open(path)
-    try:
-        return len(doc)
-    finally:
-        doc.close()
-
-
 def format_pdf_page(page_number: int, text: str, date: str = "unknown") -> str:
     return f"## p. {page_number} - date: {date}\n\n{text.strip()}\n"
+
+
+def pdf_page_count(path: Path) -> int:
+    return _pdf_page_count(path)
+
+
+def pdf_page_to_markdown(
+    path: Path,
+    page_number: int,
+    *,
+    engine: OCR_ENGINE_KINDS = "model",
+    model_name: str | None = None,
+    dpi: int = 250,
+) -> str:
+    image = pdf_page_to_image(path, page_number, dpi=dpi)
+    text = transcribe_image(
+        image,
+        engine=engine,
+        model_name=model_name,
+        source_path=str(path),
+        source_mtime=path.stat().st_mtime,
+    )
+    return format_pdf_page(page_number, text)
 
 
 def pdf_to_markdown(
@@ -33,6 +52,7 @@ def pdf_to_markdown(
     engine: OCR_ENGINE_KINDS = "model",
     model_name: str | None = None,
     start_page: int = 1,
+    dpi: int = 250,
 ) -> str:
     if start_page < 1:
         raise ValueError("start_page must be 1 or greater")
@@ -48,7 +68,7 @@ def pdf_to_markdown(
                 source_mtime=path.stat().st_mtime,
             ),
         )
-        for page_number, image in enumerate(pdf_to_images(path), start=1)
+        for page_number, image in enumerate(pdf_to_images(path, dpi=dpi), start=1)
         if page_number >= start_page
     ]
     return "\n---\n".join(pages)
@@ -88,6 +108,7 @@ def convert_file(
     engine: OCR_ENGINE_KINDS = "model",
     model_name: str | None = None,
     start_page: int = 1,
+    dpi: int = 250,
 ) -> str:
     loader = LOADERS.get(path.suffix.lower())
     if loader is None:
@@ -98,5 +119,6 @@ def convert_file(
             engine=engine,
             model_name=model_name,
             start_page=start_page,
+            dpi=dpi,
         )
     return loader(path)

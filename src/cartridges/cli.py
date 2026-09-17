@@ -20,6 +20,7 @@ class Cli:
         model: str = "",
         use_agent: bool = False,
         engine: str = "model",
+        dpi: int = 250,
     ) -> None:
         """Convert a source document into a golden-format markdown transcription.
 
@@ -38,6 +39,7 @@ class Cli:
             engine=engine,
             model=model,
             use_agent=use_agent,
+            dpi=dpi,
         )
 
     def pdf_to_image(
