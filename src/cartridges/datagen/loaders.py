@@ -5,6 +5,7 @@ unstructured vs. custom). Fill these in once that's decided.
 """
 
 from pathlib import Path
+import re
 
 from cartridges.processors.ocr import (
     OCR_ENGINE_KINDS,
@@ -16,7 +17,11 @@ from cartridges.processors.ocr import (
 
 
 def split_markdown_pages(markdown: str) -> list[str]:
-    return [section.strip() for section in markdown.split("---") if section.strip()]
+    return [
+        section.strip()
+        for section in re.split(r"(?m)^\s*---\s*$", markdown)
+        if section.strip()
+    ]
 
 
 def format_pdf_page(page_number: int, text: str, date: str = "unknown") -> str:
