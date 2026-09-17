@@ -19,7 +19,7 @@ class Cli:
         output_path: str,
         model: str = "",
         use_agent: bool = False,
-        engine: str = "paddleocr",
+        engine: str = "model",
     ) -> None:
         """Convert a source document into a golden-format markdown transcription.
 
@@ -27,7 +27,7 @@ class Cli:
         the Anthropic agent workflow instead.
 
         model: optional model name to use (e.g. 'prithivMLmods/Qwen2-VL-OCR-2B-Instruct').
-        For the non-agent Prefect path, pass engine='model' to use the Modal
+        For the non-agent Prefect path, engine='model' uses the cached Modal
         model OCR engine; engine='paddleocr' uses local PaddleOCR.
         """
         from cartridges.datagen.flows import prepare_data_flow

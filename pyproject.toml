@@ -32,4 +32,5 @@ prerelease = "allow"
 [dependency-groups]
 dev = [
     "marimo>=0.24.2",
+    "pytest>=9.0.0",
 ]

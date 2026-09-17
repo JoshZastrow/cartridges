@@ -9,23 +9,49 @@ from pathlib import Path
 from cartridges.processors.ocr import OCR_ENGINE_KINDS, pdf_to_images, transcribe_image
 
 
+def split_markdown_pages(markdown: str) -> list[str]:
+    return [section.strip() for section in markdown.split("---") if section.strip()]
+
+
+def pdf_page_count(path: Path) -> int:
+    import fitz  # pymupdf
+
+    doc = fitz.open(path)
+    try:
+        return len(doc)
+    finally:
+        doc.close()
+
+
+def format_pdf_page(page_number: int, text: str, date: str = "unknown") -> str:
+    return f"## p. {page_number} - date: {date}\n\n{text.strip()}\n"
+
+
 def pdf_to_markdown(
     path: Path,
     *,
-    engine: OCR_ENGINE_KINDS = "paddleocr",
+    engine: OCR_ENGINE_KINDS = "model",
     model_name: str | None = None,
+    start_page: int = 1,
 ) -> str:
+    if start_page < 1:
+        raise ValueError("start_page must be 1 or greater")
+
     pages = [
-        transcribe_image(
-            image,
-            engine=engine,
-            model_name=model_name,
-            source_path=str(path),
-            source_mtime=path.stat().st_mtime,
+        format_pdf_page(
+            page_number,
+            transcribe_image(
+                image,
+                engine=engine,
+                model_name=model_name,
+                source_path=str(path),
+                source_mtime=path.stat().st_mtime,
+            ),
         )
-        for image in pdf_to_images(path)
+        for page_number, image in enumerate(pdf_to_images(path), start=1)
+        if page_number >= start_page
     ]
-    return "\n\n---\n\n".join(pages)
+    return "\n---\n".join(pages)
 
 
 def docx_to_markdown(path: Path) -> str:
@@ -59,12 +85,18 @@ LOADERS = {
 def convert_file(
     path: Path,
     *,
-    engine: OCR_ENGINE_KINDS = "paddleocr",
+    engine: OCR_ENGINE_KINDS = "model",
     model_name: str | None = None,
+    start_page: int = 1,
 ) -> str:
     loader = LOADERS.get(path.suffix.lower())
     if loader is None:
         raise ValueError(f"no loader registered for {path.suffix!r}")
     if path.suffix.lower() == ".pdf":
-        return pdf_to_markdown(path, engine=engine, model_name=model_name)
+        return pdf_to_markdown(
+            path,
+            engine=engine,
+            model_name=model_name,
+            start_page=start_page,
+        )
     return loader(path)
