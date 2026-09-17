@@ -5,7 +5,7 @@ from pathlib import Path
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from cartridges.datagen.ocr import pdf_to_images, vlm_transcribe_image
+from cartridges.processors.ocr import pdf_to_images, transcribe_image
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,9 @@ async def pdf_page_to_image(args):
 @tool(
     "ocr_pdf_page",
     "Run OCR on one page (1-indexed) of a PDF and return the raw recognized text. "
-    "Pass model='' to use the default model, or an explicit model name (e.g. "
-    "'prithivMLmods/Qwen2-VL-OCR-2B-Instruct') to use a different deployed model.",
+    "Pass model='paddleocr' for local PaddleOCR, model='' for the default deployed "
+    "model, or an explicit model name (e.g. "
+    "'prithivMLmods/Qwen2-VL-OCR-2B-Instruct') for a different deployed model.",
     {"pdf_path": str, "page_number": int, "model": str},
 )
 async def ocr_pdf_page(args):
@@ -60,9 +61,14 @@ async def ocr_pdf_page(args):
             "content": [{"type": "text", "text": f"page_number must be 1..{len(pages)}"}],
             "is_error": True,
         }
-    text = vlm_transcribe_image(
+
+    model = args["model"].strip()
+    use_paddleocr = model.lower() in {"paddle", "paddleocr", "local"}
+    model_name = None if use_paddleocr or not model else model
+    text = transcribe_image(
         pages[page_number - 1],
-        model_name=args["model"].strip() or None,
+        engine="paddleocr" if use_paddleocr else "model",
+        model_name=model_name,
         source_path=pdf_path,
         source_mtime=Path(pdf_path).stat().st_mtime,
     )
@@ -74,7 +80,7 @@ async def ocr_pdf_page(args):
     "Append one transcribed page to the output markdown file, in page order. "
     "Formats it as '## p. N - date: D' followed by the text, with pages "
     "separated by a '---' line. Pass date='' if no date is visible on this "
-    "page — the most recently seen date for this output file is carried "
+    "page; the most recently seen date for this output file is carried "
     "forward automatically (or 'unknown' if none seen yet). Call once per "
     "page, in increasing page order; the first call (re)creates the file.",
     {"output_path": str, "page_number": int, "date": str, "text": str},

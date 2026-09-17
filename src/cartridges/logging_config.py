@@ -1,10 +1,5 @@
-"""One place to configure logging; every module just does `getLogger(__name__)`."""
+"""Compatibility wrapper for the old logging_config module."""
 
-import logging
+from cartridges.logging.config import configure_logging
 
-_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
-_DATEFMT = "%Y-%m-%d %H:%M:%S"
-
-
-def configure_logging(level: int = logging.INFO) -> None:
-    logging.basicConfig(level=level, format=_FORMAT, datefmt=_DATEFMT)
+__all__ = ["configure_logging"]

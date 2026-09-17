@@ -6,11 +6,25 @@ unstructured vs. custom). Fill these in once that's decided.
 
 from pathlib import Path
 
-from cartridges.datagen.ocr import ocr_image, pdf_to_images
+from cartridges.processors.ocr import OCR_ENGINE_KINDS, pdf_to_images, transcribe_image
 
 
-def pdf_to_markdown(path: Path) -> str:
-    pages = [ocr_image(image) for image in pdf_to_images(path)]
+def pdf_to_markdown(
+    path: Path,
+    *,
+    engine: OCR_ENGINE_KINDS = "paddleocr",
+    model_name: str | None = None,
+) -> str:
+    pages = [
+        transcribe_image(
+            image,
+            engine=engine,
+            model_name=model_name,
+            source_path=str(path),
+            source_mtime=path.stat().st_mtime,
+        )
+        for image in pdf_to_images(path)
+    ]
     return "\n\n---\n\n".join(pages)
 
 
@@ -42,8 +56,15 @@ LOADERS = {
 }
 
 
-def convert_file(path: Path) -> str:
+def convert_file(
+    path: Path,
+    *,
+    engine: OCR_ENGINE_KINDS = "paddleocr",
+    model_name: str | None = None,
+) -> str:
     loader = LOADERS.get(path.suffix.lower())
     if loader is None:
         raise ValueError(f"no loader registered for {path.suffix!r}")
+    if path.suffix.lower() == ".pdf":
+        return pdf_to_markdown(path, engine=engine, model_name=model_name)
     return loader(path)

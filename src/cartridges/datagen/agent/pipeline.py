@@ -6,7 +6,7 @@ from pathlib import Path
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
 from cartridges.datagen.agent.tools import prepare_data_server
-from cartridges.datagen.cache import init_cache
+from cartridges.storage.cache import init_cache
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ async def prepare_data(pdf_path: Path, output_path: Path, model: str = "") -> No
         skills=["prepare-data"],
         cwd=str(Path.cwd()),
         permission_mode="bypassPermissions",
-        # long documents need many sequential tool-call turns (2+ per page)
+        # Long documents need many sequential tool-call turns (2+ per page).
         max_turns=2000,
     )
     model_clause = f" using model '{model}' for every ocr_pdf_page call" if model else ""
