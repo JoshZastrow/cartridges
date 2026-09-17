@@ -12,9 +12,7 @@ from cartridges.processors.ocr import OCR_ENGINE_KINDS
 
 @task
 def ensure_transcription_cache(engine: OCR_ENGINE_KINDS) -> None:
-    if engine != "model":
-        return
-
+    del engine
     from cartridges.storage.cache import init_cache
 
     init_cache()

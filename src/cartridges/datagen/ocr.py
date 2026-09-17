@@ -3,6 +3,7 @@
 from cartridges.processors.ocr import (
     MODEL_NAME,
     OCR_ENGINE_KINDS,
+    PADDLE_OCR_MODEL_ID,
     QWEN_OCR_MODEL_NAME,
     OcrEngine,
     create_ocr_engine,
@@ -16,6 +17,7 @@ from cartridges.processors.ocr import (
 __all__ = [
     "MODEL_NAME",
     "OCR_ENGINE_KINDS",
+    "PADDLE_OCR_MODEL_ID",
     "QWEN_OCR_MODEL_NAME",
     "OcrEngine",
     "create_ocr_engine",

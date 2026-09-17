@@ -81,6 +81,7 @@ except ModuleNotFoundError:
 
 MODEL_NAME = "deepseek-ai/DeepSeek-OCR-2"
 QWEN_OCR_MODEL_NAME = "prithivMLmods/Qwen2-VL-OCR-2B-Instruct"
+PADDLE_OCR_MODEL_ID = "paddleocr:PP-OCRv5_server_det+PP-OCRv5_server_rec"
 MINUTES = 60
 OCR_ENGINE_KINDS = Literal["paddleocr", "model"]
 
@@ -125,6 +126,8 @@ def pdf_to_images(pdf_path: Path, dpi: int = 400) -> list[Image.Image]:
 class PaddleOcrEngine:
     """PaddleOCR-backed local OCR engine."""
 
+    model_name = PADDLE_OCR_MODEL_ID
+
     def __init__(self) -> None:
         self._engine = None
 
@@ -151,12 +154,22 @@ class PaddleOcrEngine:
     ) -> str:
         import numpy as np
 
-        del source_path, source_mtime
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
+        page_hash = hash_image_bytes(image_bytes)
+
+        cached = get_cached(page_hash, self.model_name)
+        if cached is not None:
+            return cached
+
         results = self._get_engine().predict(np.array(image.convert("RGB")))
         lines: list[str] = []
         for res in results:
             lines.extend(res["rec_texts"])
-        return "\n".join(lines)
+        transcription = "\n".join(lines)
+        put_cached(page_hash, self.model_name, transcription, source_path, source_mtime)
+        return transcription
 
 
 class ModelOcrEngine:
