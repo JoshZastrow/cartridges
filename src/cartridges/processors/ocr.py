@@ -107,7 +107,7 @@ class OcrEngine(Protocol):
         """Return recognized text for a single page image."""
 
 
-def pdf_page_to_image(pdf_path: Path, page_number: int, dpi: int = 250) -> Image.Image:
+def pdf_page_to_image(pdf_path: Path, page_number: int, dpi: int = 400) -> Image.Image:
     import fitz  # pymupdf
     from PIL import Image
 
@@ -123,7 +123,7 @@ def pdf_page_to_image(pdf_path: Path, page_number: int, dpi: int = 250) -> Image
         doc.close()
 
 
-def pdf_to_images(pdf_path: Path, dpi: int = 250) -> list[Image.Image]:
+def pdf_to_images(pdf_path: Path, dpi: int = 400) -> list[Image.Image]:
     return [
         pdf_page_to_image(pdf_path, page_number, dpi=dpi)
         for page_number in range(1, pdf_page_count(pdf_path) + 1)

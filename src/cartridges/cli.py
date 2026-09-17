@@ -20,7 +20,7 @@ class Cli:
         model: str = "",
         use_agent: bool = False,
         engine: str = "model",
-        dpi: int = 250,
+        dpi: int = 400,
     ) -> None:
         """Convert a source document into a golden-format markdown transcription.
 

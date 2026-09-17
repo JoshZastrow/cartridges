@@ -42,7 +42,7 @@ def pdf_page_to_markdown(
     *,
     engine: OCR_ENGINE_KINDS = "model",
     model_name: str | None = None,
-    dpi: int = 250,
+    dpi: int = 400,
 ) -> str:
     image = pdf_page_to_image(path, page_number, dpi=dpi)
     text = transcribe_image(
@@ -61,7 +61,7 @@ def pdf_to_markdown(
     engine: OCR_ENGINE_KINDS = "model",
     model_name: str | None = None,
     start_page: int = 1,
-    dpi: int = 250,
+    dpi: int = 400,
 ) -> str:
     if start_page < 1:
         raise ValueError("start_page must be 1 or greater")

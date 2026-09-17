@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from cartridges.datagen.loaders import pdf_page_count, split_markdown_pages
+from cartridges.datagen.loaders import (
+    format_pdf_page,
+    pdf_page_count,
+    split_markdown_pages,
+)
 
 
 MORNING_PAGES_PDF = Path("data/journals/inputs/Morning Pages.pdf")
@@ -17,3 +21,10 @@ def test_morning_pages_output_has_one_section_per_pdf_page():
     output_sections = split_markdown_pages(MORNING_PAGES_OUTPUT.read_text())
 
     assert len(output_sections) == expected_pages
+
+
+def test_format_pdf_page_escapes_standalone_delimiter_lines():
+    page = format_pdf_page(1, "before\n---\nafter")
+
+    assert "- - -" in page
+    assert len(split_markdown_pages(page)) == 1

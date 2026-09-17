@@ -42,7 +42,7 @@ def transcribe_pdf_page(
     *,
     engine: OCR_ENGINE_KINDS = "model",
     model: str = "",
-    dpi: int = 250,
+    dpi: int = 400,
 ) -> str:
     from cartridges.datagen.loaders import pdf_page_to_markdown
 
@@ -66,7 +66,7 @@ def convert_document(
     engine: OCR_ENGINE_KINDS = "model",
     model: str = "",
     start_page: int = 1,
-    dpi: int = 250,
+    dpi: int = 400,
 ) -> str:
     from cartridges.datagen.loaders import convert_file
 
