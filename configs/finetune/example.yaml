@@ -1,0 +1,16 @@
+# Edit this (or copy it) before a run, then:
+#   uv run modal run -m cartridges.training.finetune::run_finetune \
+#     --config-file configs/finetune/example.yaml
+#
+# Any field from TrainConfig (src/cartridges/training/config.py) can go
+# here. CLI flags passed alongside --config-file override whatever's set in
+# this file (e.g. `--notes "..."` overrides the notes: line below).
+
+max_steps: 60
+learning_rate: 0.0002
+lora_r: 16
+lora_alpha: 16
+
+group: default
+notes: ""
+tags: []

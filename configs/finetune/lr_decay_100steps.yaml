@@ -1,0 +1,16 @@
+# Cosine LR decay 2e-4 -> 1e-4 floor over 100 steps, on the grown
+# 309-example dataset (Morning_Pages + There_He_Is).
+max_steps: 100
+learning_rate: 0.0002
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr: 0.0001
+lora_r: 16
+lora_alpha: 16
+
+save_steps: 25
+save_total_limit: 3
+
+group: lr-decay-100steps-2026-09-21
+notes: "Cosine decay 2e-4->1e-4 floor, 100 steps, grown dataset (309 train examples across 2 journals)."
+tags: [lr-decay, 100steps, grown-dataset]
