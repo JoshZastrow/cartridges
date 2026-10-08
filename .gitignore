@@ -30,3 +30,6 @@ data/
 .neon
 .env.local
 node_modules/
+
+# torch.profiler traces / profiling results (large, not committed)
+profiles/
