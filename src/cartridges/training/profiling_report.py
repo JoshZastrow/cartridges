@@ -35,11 +35,6 @@ def report(*files: str, baseline_file: str = "profiles/unsloth_v1.json", baselin
                 f" {r['peak_mem_gb']:6.1f} {r['cer_vs_reference']:7.4f}"
                 f" {'' if cer_cur is None else f'{cer_cur:10.4f}'} {'' if ref is None else ref == r['hypothesis']}"
             )
-        for p in result.get("profiles", []):
-            print(
-                f"  profile {p['step']}: generate={p['generate_s']:.2f}s prefill={p['prefill_s']:.2f}s"
-                f" out={p['output_tokens']} gpu_kernel_time={p['gpu_kernel_time_s']:.2f}s {p['sync_counts']}"
-            )
 
 
 if __name__ == "__main__":

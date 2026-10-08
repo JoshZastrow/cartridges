@@ -63,6 +63,130 @@ def parse_nvidia_smi_line(line: str) -> tuple[float, float] | None:
         return None
 
 
+LAUNCH_CALLS = {"cudaLaunchKernel", "cudaLaunchKernelExC", "cuLaunchKernel", "cuLaunchKernelEx", "cudaGraphLaunch"}
+SYNC_CALLS = {"cudaStreamSynchronize", "cudaDeviceSynchronize", "cudaEventSynchronize"}
+# CPU ops that block on the GPU (.item() / .tolist() / .cpu() / nonzero)
+SYNC_OPS = {"aten::item", "aten::_local_scalar_dense", "aten::nonzero"}
+GPU_CATS = {"kernel", "gpu_memcpy", "gpu_memset"}
+
+
+def _union_length(intervals: list[tuple[float, float]]) -> tuple[float, list[float]]:
+    """Total covered length of possibly-overlapping intervals, plus the gaps between them."""
+    covered, gaps = 0.0, []
+    cur = None
+    for start, end in sorted(intervals):
+        if cur is None:
+            cur = [start, end]
+        elif start > cur[1]:
+            covered += cur[1] - cur[0]
+            gaps.append(start - cur[1])
+            cur = [start, end]
+        else:
+            cur[1] = max(cur[1], end)
+    if cur is not None:
+        covered += cur[1] - cur[0]
+    return covered, gaps
+
+
+def trace_stats(events: list[dict], step_name: str = "decode_step", gap_us: float = 20.0) -> dict:
+    """Per-decode-step host/GPU statistics from a torch.profiler Chrome trace.
+
+    `events` is the trace's "traceEvents" list (timestamps in microseconds).
+    Decode steps are the `record_function(step_name)` CPU ranges; launches,
+    host syncs, and logits-processor time are attributed to the step whose
+    range contains them. GPU busy/idle is measured over the whole decode
+    window (first step start -> last step end).
+    """
+    complete = [e for e in events if e.get("ph") == "X" and "dur" in e]
+    steps = sorted(
+        (e["ts"], e["ts"] + e["dur"]) for e in complete
+        if e.get("cat") == "user_annotation" and e["name"] == step_name
+    )
+    stage_ms: dict[str, float] = {}
+    for e in complete:
+        if e.get("cat") == "user_annotation":
+            stage_ms[e["name"]] = stage_ms.get(e["name"], 0.0) + e["dur"] / 1e3
+    if not steps:
+        return {"n_steps": 0, "stage_ms": stage_ms}
+
+    def in_steps(e) -> bool:
+        return any(s <= e["ts"] < t for s, t in steps)
+
+    launches = syncs = memcpy_calls = dtoh = 0
+    sync_ops: dict[str, int] = {}
+    proc_us = 0.0
+    for e in complete:
+        name, cat = e["name"], e.get("cat")
+        if cat == "cuda_runtime" and name in LAUNCH_CALLS and in_steps(e):
+            launches += 1
+        elif cat == "cuda_runtime" and name in SYNC_CALLS and in_steps(e):
+            syncs += 1
+        elif cat == "cuda_runtime" and name == "cudaMemcpyAsync" and in_steps(e):
+            memcpy_calls += 1
+        elif cat == "gpu_memcpy" and "DtoH" in name and in_steps(e):
+            dtoh += 1  # GPU-side timestamp; profiler aligns the clocks
+        elif cat == "cpu_op" and name in SYNC_OPS and in_steps(e):
+            sync_ops[name] = sync_ops.get(name, 0) + 1
+        elif cat == "user_annotation" and name.startswith("logits_processors") and in_steps(e):
+            proc_us += e["dur"]
+
+    window = (steps[0][0], steps[-1][1])
+    gpu = [
+        (max(e["ts"], window[0]), min(e["ts"] + e["dur"], window[1])) for e in complete
+        if e.get("cat") in GPU_CATS and e["ts"] < window[1] and e["ts"] + e["dur"] > window[0]
+    ]
+    busy, gaps = _union_length(gpu)
+    span = window[1] - window[0]
+    n = len(steps)
+    return {
+        "n_steps": n,
+        "step_ms": sum(t - s for s, t in steps) / n / 1e3,
+        "launches_per_step": launches / n,
+        "stream_syncs_per_step": syncs / n,
+        "memcpy_calls_per_step": memcpy_calls / n,
+        "dtoh_copies_per_step": dtoh / n,
+        "sync_ops_per_step": {k: v / n for k, v in sync_ops.items()},
+        "logits_processors_ms_per_step": proc_us / n / 1e3,
+        "gpu_busy_frac": busy / span if span > 0 else None,
+        "gpu_gaps_per_step": sum(1 for g in gaps if g > gap_us) / n,
+        "gpu_idle_frac_in_gaps": sum(g for g in gaps if g > gap_us) / span if span > 0 else None,
+        "stage_ms": stage_ms,
+    }
+
+
+def step_durations(call_times: list[float], t_end: float) -> list[float]:
+    """Durations of consecutive steps that start at `call_times` (sorted) and
+    end at the next start, the last one at `t_end`."""
+    bounds = list(call_times) + [t_end]
+    return [b - a for a, b in zip(bounds, bounds[1:])]
+
+
+def summarize(values: list[float]) -> dict:
+    if not values:
+        return {"n": 0}
+    ordered = sorted(values)
+    return {
+        "n": len(values),
+        "mean": sum(values) / len(values),
+        "p50": ordered[len(ordered) // 2],
+        "p90": ordered[min(len(ordered) - 1, int(len(ordered) * 0.9))],
+        "max": ordered[-1],
+    }
+
+
+# Top-level stages of one model.infer() call, in order; nested labels
+# (vision_encode.*, logits_processors.*, lm.layer*) are excluded so the sum
+# is comparable to wall time.
+TOP_LEVEL_STAGES = ("save_image", "preprocess", "generate_setup", "prefill", "decode_step", "decode_text")
+
+
+def stage_coverage(stage_ms: dict[str, float], wall_ms: float) -> float | None:
+    """Fraction of wall time covered by the top-level stage labels."""
+    if wall_ms <= 0:
+        return None
+    return sum(stage_ms.get(s, 0.0) for s in TOP_LEVEL_STAGES) / wall_ms
+
+
 class NoRepeatNGramBlocker:
     """Incremental, exact equivalent of HF's `NoRepeatNGramLogitsProcessor`
     for a single sequence.

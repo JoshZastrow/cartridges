@@ -1,8 +1,22 @@
 """Measure, profile, and speed up single-page OCR inference on Modal.
 
 Own Modal app ("cartridges-profiling"), reusing training's image and model
-loader. One call loads a model once, then applies a list of *cumulative*
-optimization steps, re-measuring the same 3 fixed test pages after each:
+loaders. Two tools:
+
+1. Single-page profiler (docs/plans/profiling.md, modes `generate` and
+   `forward`): one model.infer() call exactly as `_run_inference` makes it,
+   recorded with torch.profiler + stage labels + a 50 ms GPU sensor; writes
+   trace.json.gz, stacks_{cpu,gpu}.folded, stages.json, ops.txt, gpu.csv,
+   output.txt and report.html to /cache/profiling/<run_name>/:
+
+   uv run modal run -m cartridges.training.profiling::run_profile \\
+       --mode generate --split test --index 0 \\
+       --model-source artifact --hf-revision run-liw4qzol --run-name prof-eval-ft-test0
+   uv run python -m cartridges.training.profiling fetch prof-eval-ft-test0  # -> profiles/
+
+2. 3-page timing bench (`run_bench`): loads a model once, then applies a list
+   of *cumulative* optimization steps, re-measuring the same 3 fixed test
+   pages after each (no traces):
 
     baseline   the current path: model.infer(), HF generate, HF no_repeat_ngram
     ngram      HF's NoRepeatNGramLogitsProcessor -> exact incremental equivalent
@@ -19,7 +33,7 @@ so outputs are directly comparable to the current path.
 
 Run (detached; prints a CALL_ID to poll). The fastest output-preserving path
 measured (Unsloth load, unmerged adapter, ~124 decode tok/s on an A100):
-uv run modal run --detach -m cartridges.training.profiling::run_profile \\
+uv run modal run --detach -m cartridges.training.profiling::run_bench \\
     --run-name fast --loader unsloth --steps moe_sync,cuda_graph,batched_moe
 uv run python -m cartridges.training.profiling poll <CALL_ID> profiles/fast.json
 uv run python -m cartridges.training.profiling_report profiles/fast.json
@@ -28,6 +42,7 @@ uv run python -m cartridges.training.profiling_report profiles/fast.json
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import sys
 import time
@@ -36,10 +51,25 @@ import modal
 from pydantic import BaseModel
 
 from cartridges.training.config import EvalConfig, ModelSource, TrainConfig
-from cartridges.training.finetune import _stage, hf_secret, image, logger, model_cache
+from cartridges.training.finetune import (
+    WANDB_ENTITY,
+    WANDB_PROJECT,
+    _stage,
+    hf_secret,
+    image,
+    logger,
+    model_cache,
+    wandb_secret,
+)
+from cartridges.training.fast_decode import (
+    RANGES,
+    CudaGraphDecoder,
+    _IncrementalNoRepeatNGram,
+    _moe_modules,
+    _patch_moe,
+)
 from cartridges.training.perf_metrics import (
     GenerationTiming,
-    NoRepeatNGramBlocker,
     mean_in_window,
     parse_nvidia_smi_line,
 )
@@ -50,10 +80,6 @@ PROFILING_DIR = "/cache/profiling"  # the only place on the shared volume we wri
 # Fixed test-split pages, picked by reference token length (DeepSeek tokenizer):
 # p10 / median / p90 of the 78 test pages = 87 / 249 / 611 tokens.
 PAGES = {"short": 25, "median": 19, "long": 48}
-PROFILE_PAGE = "median"
-# torch.profiler with with_stack on a full page makes a multi-hundred-MB
-# trace; 48 decode steps is plenty to see the per-step pattern.
-PROFILE_MAX_NEW_TOKENS = 48
 
 STEPS = ("baseline", "ngram", "merge", "moe_sync", "cuda_graph", "batched_moe")
 
@@ -71,7 +97,6 @@ class ProfileConfig(BaseModel):
     # Any `run-<wandb_id>` tag (or branch/sha) in TrainConfig.hf_repo_id;
     # attached unmerged to a fresh base load. "" = base model only.
     hf_revision: str = "run-liw4qzol"
-    profile_steps: list[str] = []
     # Same clamp `_capped_generate` applies on the current eval path.
     max_new_tokens: int = 1024
     # Measure every test-split page, not just the 3 fixed ones (a corpus-level
@@ -83,10 +108,10 @@ class ProfileConfig(BaseModel):
 
 
 class GpuSampler:
-    """`nvidia-smi -lms 200` in the background; samples stamped with this
-    process's perf_counter clock so they line up with generation timers."""
+    """`nvidia-smi -lms <interval>` in the background; samples stamped with
+    this process's perf_counter clock so they line up with generation timers."""
 
-    def __init__(self):
+    def __init__(self, interval_ms: int = 200):
         import subprocess
         import threading
 
@@ -94,7 +119,7 @@ class GpuSampler:
         self.proc = subprocess.Popen(
             [
                 "nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
-                "--format=csv,noheader,nounits", "-lms", "200",
+                "--format=csv,noheader,nounits", "-lms", str(interval_ms),
             ],
             stdout=subprocess.PIPE, text=True,
         )
@@ -136,26 +161,6 @@ class _FirstTokenTimer:
         return scores
 
 
-class _IncrementalNoRepeatNGram:
-    """Drop-in for HF's NoRepeatNGramLogitsProcessor (batch 1), backed by
-    `NoRepeatNGramBlocker`'s incremental n-gram index."""
-
-    def __init__(self, ngram_size: int):
-        self.ngram_size = ngram_size
-        self.blocker: NoRepeatNGramBlocker | None = None
-
-    def __call__(self, input_ids, scores):
-        if self.blocker is None:
-            self.blocker = NoRepeatNGramBlocker(self.ngram_size, input_ids[0].tolist())
-        else:
-            for token in input_ids[0, len(self.blocker.tokens) :].tolist():
-                self.blocker.append(token)
-        banned = self.blocker.banned()
-        if banned:
-            scores[0, banned] = -float("inf")
-        return scores
-
-
 class _State:
     """What the generate() wrapper should do; mutated by the optimization steps."""
 
@@ -163,7 +168,56 @@ class _State:
         self.max_new_tokens = max_new_tokens
         self.fast_ngram = False
         self.graph_decoder: CudaGraphDecoder | None = None
+        # generate() kwarg overrides over infer()'s hardcoded ones (DecodingConfig)
+        self.decoding: dict = {}
+        # `forward` profile mode: one prompt forward pass, no decoding
+        self.forward_only = False
         self.last: dict = {}
+        # CPU wall time of each logits-processor-list call in the current
+        # generate(), and the same split by processor class
+        self.processor_s: list[float] = []
+        self.processor_times: dict[str, list[float]] = {}
+
+
+def _install_stage_hooks(inner) -> None:
+    """Label vision encoder / projector / language-model calls inside infer()."""
+    lm = inner.model
+    lm.register_forward_pre_hook(lambda module, args: RANGES.lm_call())
+    labelled = [(f"vision_encode.{attr}", getattr(lm, attr)) for attr in ("sam_model", "qwen2_model", "projector")]
+    labelled += [(f"lm.layer{i:02d}", layer) for i, layer in enumerate(lm.layers)]
+    for name, module in labelled:
+        module.register_forward_pre_hook(lambda m, a, name=name: RANGES.push(name))
+        module.register_forward_hook(lambda m, a, o, name=name: RANGES.pop(name))
+
+
+def _time_logits_processors(state: _State) -> None:
+    """Replace HF's LogitsProcessorList.__call__ (called once per generate
+    step with every processor, e.g. NoRepeatNGram) with an equivalent loop
+    that labels and times each processor separately."""
+    from transformers.generation.logits_process import LogitsProcessorList
+
+    def timed(self, input_ids, scores, **kwargs):
+        RANGES.push("logits_processors")
+        start = time.perf_counter()
+        try:
+            for processor in self:
+                name = type(processor).__name__
+                RANGES.push(f"logits_processor.{name}")
+                t0 = time.perf_counter()
+                # HF passes extra kwargs only to processors that take them
+                # (none of infer()'s do); same rule here.
+                if kwargs and len(inspect.signature(processor.__call__).parameters) > 2:
+                    scores = processor(input_ids, scores, **kwargs)
+                else:
+                    scores = processor(input_ids, scores)
+                state.processor_times.setdefault(name, []).append(time.perf_counter() - t0)
+                RANGES.pop(f"logits_processor.{name}")
+            return scores
+        finally:
+            state.processor_s.append(time.perf_counter() - start)
+            RANGES.pop("logits_processors")
+
+    LogitsProcessorList.__call__ = timed
 
 
 @contextlib.contextmanager
@@ -178,12 +232,25 @@ def _instrumented_generate(inner, state: _State):
     original = inner.generate
 
     def generate(input_ids, **kwargs):
+        RANGES.pop("preprocess")  # opened by _infer(): prompt build + image tiling
+        RANGES.reset_calls()
+        state.processor_s = []
+        state.processor_times = {}
+        kwargs.update(state.decoding)
         kwargs["max_new_tokens"] = min(kwargs.get("max_new_tokens", state.max_new_tokens), state.max_new_tokens)
         timer = _FirstTokenTimer()
         torch.cuda.synchronize()
         t_start = time.perf_counter()
-        if state.graph_decoder is not None:
-            output_ids = state.graph_decoder.generate(input_ids, timer=timer, **kwargs)
+        RANGES.push("generate_setup")  # closed by the first language-model call
+        if state.forward_only:
+            out = inner(
+                input_ids=input_ids, images=kwargs["images"], images_seq_mask=kwargs["images_seq_mask"],
+                images_spatial_crop=kwargs["images_spatial_crop"], use_cache=False,
+            )
+            timer.mark()
+            output_ids = torch.cat([input_ids, out.logits[:, -1].argmax(-1, keepdim=True)], dim=1)
+        elif state.graph_decoder is not None:
+            output_ids = state.graph_decoder.generate(input_ids, timer=timer, state=state, **kwargs)
         else:
             processors = []
             if state.fast_ngram:
@@ -192,13 +259,26 @@ def _instrumented_generate(inner, state: _State):
                     processors.append(_IncrementalNoRepeatNGram(ngram_size))
             processors.append(timer)
             output_ids = original(input_ids, logits_processor=LogitsProcessorList(processors), **kwargs)
+        RANGES.end_lm()
         torch.cuda.synchronize()
+        t_end = time.perf_counter()
+        # The first processor call belongs to prefill (and absorbs its sync).
+        decode_processor_s = state.processor_s[1:]
         state.last = {
             "t_start": t_start,
             "t_first": timer.t_first,
-            "t_end": time.perf_counter(),
+            "t_end": t_end,
+            # host timestamps of each LM call: [prefill, step 1, step 2, ...]
+            "lm_call_times": list(RANGES.call_times),
+            "processor_ms_per_step": {
+                name: 1e3 * sum(times[1:]) / len(times[1:]) for name, times in state.processor_times.items()
+                if len(times) > 1
+            },
             "n_output_tokens": int(output_ids.shape[1] - input_ids.shape[1]),
             "n_prompt_tokens": int(input_ids.shape[1]),
+            "logits_processor_ms_per_step": (
+                1e3 * sum(decode_processor_s) / len(decode_processor_s) if decode_processor_s else None
+            ),
         }
         return output_ids
 
@@ -207,252 +287,6 @@ def _instrumented_generate(inner, state: _State):
         yield
     finally:
         inner.generate = original
-
-
-# --- optimizations -----------------------------------------------------------
-
-
-def _expert_linear(x, stacked: dict, name: str, idx):
-    """One expert projection for one token, replicating what the eager path
-    runs: `F.linear(x, W)` and, for an unmerged PEFT LoRA layer,
-    `result + lora_B(lora_A(x)) * scaling`. `idx` is a 1-element CUDA index
-    tensor; index_select (not `W[idx]`) keeps the gather free of host syncs."""
-    import torch
-    import torch.nn.functional as F
-
-    out = F.linear(x, torch.index_select(stacked[name], 0, idx)[0])
-    if name + ".A" in stacked:
-        lora_a = torch.index_select(stacked[name + ".A"], 0, idx)[0]
-        lora_b = torch.index_select(stacked[name + ".B"], 0, idx)[0]
-        out = out + F.linear(F.linear(x, lora_a), lora_b) * stacked[name + ".scaling"]
-    return out
-
-
-def _batched_linear(x, stacked: dict, name: str, idx):
-    """`_expert_linear` for all k routed experts at once: x [k, in] -> [k, out]."""
-    import torch
-
-    def bmm(weights, inputs):
-        return torch.bmm(torch.index_select(weights, 0, idx), inputs[..., None])[..., 0]
-
-    out = bmm(stacked[name], x)
-    if name + ".A" in stacked:
-        out = out + bmm(stacked[name + ".B"], bmm(stacked[name + ".A"], x)) * stacked[name + ".scaling"]
-    return out
-
-
-def _moe_one_sync(self, hidden_states, topk_ids, topk_weight):
-    """transformers' DeepseekV2MoE.moe with two changes:
-
-    1. `tokens_per_expert.tolist()` once, instead of iterating the CUDA tensor
-       (`if num_tokens == 0` on each element = one blocking GPU->CPU sync per
-       expert: 64 experts x 11 MoE layers ~ 700 syncs per decoded token).
-       Same math, bit-identical outputs.
-    2. If `CudaGraphDecoder` stacked the expert weights (`_stacked`) and this
-       is a single token, run the top-k experts from gathered weights: same
-       per-expert ops as eager (LoRA left unmerged), but no host sync and
-       static shapes, so the decode step can be captured in a CUDA graph.
-    """
-    import torch
-
-    stacked = getattr(self, "_stacked", None)
-    if hidden_states.shape[0] == 1 and stacked is not None and getattr(self, "_batched", False):
-        # All k routed experts at once: gather [k, out, in] weights, bmm.
-        # ~6x fewer kernels than the per-expert path below; same math up to
-        # matmul accumulation order (LoRA still unmerged).
-        idx = topk_ids[0]
-        x = hidden_states.expand(idx.shape[0], -1)
-        act = self.experts[0].act_fn(_batched_linear(x, stacked, "gate_proj", idx))
-        h = act * _batched_linear(x, stacked, "up_proj", idx)
-        out = _batched_linear(h, stacked, "down_proj", idx)  # [k, hidden]
-        return (out.type(topk_weight.dtype) * topk_weight[0, :, None]).sum(0, keepdim=True).type(out.dtype)
-
-    if hidden_states.shape[0] == 1 and stacked is not None:
-        act_fn = self.experts[0].act_fn
-        outs = []
-        for j in range(topk_ids.shape[1]):
-            idx = topk_ids[0, j : j + 1]
-            gate = _expert_linear(hidden_states, stacked, "gate_proj", idx)
-            up = _expert_linear(hidden_states, stacked, "up_proj", idx)
-            outs.append(_expert_linear(act_fn(gate) * up, stacked, "down_proj", idx))
-        out = torch.cat(outs, dim=0)  # [k, hidden], in topk order like eager's new_x
-        return (
-            out.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(out.dtype)
-        )
-
-    cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
-    cnts.scatter_(1, topk_ids, 1)
-    tokens_per_expert = cnts.sum(dim=0).tolist()
-    indicies = topk_ids.view(-1).argsort()
-    sorted_tokens = hidden_states[indicies // topk_ids.shape[1]]
-    outputs = []
-    start_idx = 0
-    for i, num_tokens in enumerate(tokens_per_expert):
-        if num_tokens == 0:
-            continue
-        end_idx = start_idx + num_tokens
-        outputs.append(self.experts[i + self.ep_rank * self.experts_per_rank](sorted_tokens[start_idx:end_idx]))
-        start_idx = end_idx
-    outs = torch.cat(outputs, dim=0) if outputs else sorted_tokens.new_empty(0)
-    new_x = torch.empty_like(outs)
-    new_x[indicies] = outs
-    return (
-        new_x.view(*topk_ids.shape, -1)
-        .type(topk_weight.dtype)
-        .mul_(topk_weight.unsqueeze(dim=-1))
-        .sum(dim=1)
-        .type(new_x.dtype)
-    )
-
-
-def _moe_modules(model):
-    return [m for m in model.modules() if hasattr(m, "experts") and hasattr(m, "moe")]
-
-
-def _patch_moe(model) -> int:
-    classes = {type(m) for m in _moe_modules(model)}
-    for cls in classes:
-        cls.moe = _moe_one_sync
-    return len(classes)
-
-
-class CudaGraphDecoder:
-    """Greedy decode with a static KV cache and the 1-token step replayed
-    from a CUDA graph. Prefill still runs the model's own forward (vision
-    encoder + full prompt) eagerly, into the same static cache.
-
-    Decoding semantics match `infer()`'s generate call: greedy, stop at
-    eos_token_id (included in the output), max_new_tokens, and the same
-    no-repeat-n-gram rule (checked on the CPU each step; the argmax token
-    has to come back to the host anyway to check it and for EOS).
-    """
-
-    # Prompt is ~1,150 tokens max (257 global + up to 6x144 crop tokens + text)
-    # plus max_new_tokens <= 1024; one fixed size = one graph for every page.
-    MAX_CACHE_LEN = 2560
-
-    def __init__(self, model):
-        import torch
-        from transformers import StaticCache
-
-        self.model = model
-        self.cache = StaticCache(config=model.config, max_cache_len=self.MAX_CACHE_LEN)
-        self.ids = torch.zeros((1, 1), dtype=torch.long, device="cuda")
-        self.pos = torch.zeros((1,), dtype=torch.long, device="cuda")
-        self.graph = None
-        self.logits = None
-        self._stack_expert_weights()
-
-    def _stack_expert_weights(self):
-        """Stack each MoE layer's per-expert weights ([E, out, in]), plus the
-        LoRA A/B matrices if the adapter is still unmerged, so the decode
-        step can gather the routed experts without leaving the GPU. Prefill
-        keeps using the per-expert modules (copies, ~5 GB extra in bf16)."""
-        import torch
-
-        for moe in _moe_modules(self.model):
-            stacked = {}
-            for name in ("gate_proj", "up_proj", "down_proj"):
-                layers = [getattr(e, name) for e in moe.experts]
-                if hasattr(layers[0], "base_layer"):  # unmerged PEFT lora.Linear
-                    stacked[name] = torch.stack([l.base_layer.weight for l in layers])
-                    stacked[name + ".A"] = torch.stack([l.lora_A["default"].weight for l in layers])
-                    stacked[name + ".B"] = torch.stack([l.lora_B["default"].weight for l in layers])
-                    stacked[name + ".scaling"] = layers[0].scaling["default"]
-                else:
-                    stacked[name] = torch.stack([l.weight for l in layers])
-            moe._stacked = stacked
-
-    def _step(self):
-        from transformers import DeepseekV2Model
-
-        lm = self.model.model
-        out = DeepseekV2Model.forward(
-            lm,
-            inputs_embeds=lm.embed_tokens(self.ids),
-            position_ids=self.pos[None],
-            past_key_values=self.cache,
-            cache_position=self.pos,
-            use_cache=True,
-        )
-        return self.model.lm_head(out.last_hidden_state[:, -1]).float()
-
-    def _capture(self):
-        import torch
-
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            for _ in range(3):  # also lazily allocates the static cache
-                self._step()
-        torch.cuda.current_stream().wait_stream(stream)
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            self.logits = self._step()
-        self.cache.reset()
-
-    def generate(self, input_ids, *, timer, images, images_seq_mask, images_spatial_crop,
-                 eos_token_id, max_new_tokens, no_repeat_ngram_size=0, **_ignored):
-        import torch
-
-        if self.graph is None:
-            # First call happens inside infer()'s autocast/no_grad context, so
-            # the graph is captured under the same numerics as eager decode.
-            with _stage("capture_cuda_graph", max_cache_len=self.MAX_CACHE_LEN):
-                self._capture()
-        prompt_len = input_ids.shape[1]
-        if prompt_len + max_new_tokens > self.MAX_CACHE_LEN:
-            raise ValueError(f"prompt {prompt_len} + {max_new_tokens} new tokens > {self.MAX_CACHE_LEN}")
-
-        # Prefill exactly as HF generate does it (dynamic cache, all-ones
-        # attention mask -> causal SDPA), then copy K/V into the static cache;
-        # prefilling straight into the static cache would use a masked
-        # attention kernel and already perturb the first token's logits.
-        from transformers import DynamicCache
-
-        dynamic = DynamicCache()
-        prefill = self.model(
-            input_ids=input_ids,
-            attention_mask=torch.ones_like(input_ids),
-            position_ids=torch.arange(prompt_len, device=input_ids.device)[None],
-            images=images,
-            images_seq_mask=images_seq_mask,
-            images_spatial_crop=images_spatial_crop,
-            past_key_values=dynamic,
-            use_cache=True,
-        )
-        logits = prefill.logits[:, -1]
-        self.cache.reset()
-        for static_layer, dynamic_layer in zip(self.cache.layers, dynamic.layers):
-            static_layer.keys[:, :, :prompt_len].copy_(dynamic_layer.keys)
-            static_layer.values[:, :, :prompt_len].copy_(dynamic_layer.values)
-        del dynamic, prefill
-        timer.mark()
-
-        blocker = NoRepeatNGramBlocker(no_repeat_ngram_size, input_ids[0].tolist()) if no_repeat_ngram_size else None
-        tokens: list[int] = []
-        for step in range(max_new_tokens):
-            if blocker is not None:
-                banned = blocker.banned()
-                if banned:
-                    logits = logits.clone()
-                    logits[0, banned] = -float("inf")
-            token = int(logits.argmax(dim=-1))
-            tokens.append(token)
-            if blocker is not None:
-                blocker.append(token)
-            if token == eos_token_id or step == max_new_tokens - 1:
-                break
-            self.ids.fill_(token)
-            self.pos.fill_(prompt_len + step)
-            self.graph.replay()
-            logits = self.logits
-        new = torch.tensor([tokens], dtype=input_ids.dtype, device=input_ids.device)
-        return torch.cat([input_ids, new], dim=1)
 
 
 # --- model loading -----------------------------------------------------------
@@ -506,37 +340,64 @@ def _inner(model):
 # --- measurement -------------------------------------------------------------
 
 
-def _infer(inner, tokenizer, pil_image, tmpdir: str):
+def _infer(model, tokenizer, pil_image, tmpdir: str, max_new_tokens: int):
+    """One page exactly like `finetune._run_inference`: image to a temp file,
+    then `model.infer(...)` with the same kwargs, inside `_capped_generate`.
+    (On a PeftModel that cap never reaches the inner generate() infer() calls;
+    `_instrumented_generate` applies it there instead.)"""
     from pathlib import Path
 
     from cartridges.training.collator import FREE_OCR_PROMPT
+    from cartridges.training.finetune import _capped_generate
 
     train_config = TrainConfig()
-    # Same per-page disk round trip as `_run_inference` (infer() only takes a path).
+    RANGES.push("save_image")
     image_path = Path(tmpdir) / "page.png"
     pil_image.save(image_path)
-    return inner.infer(
-        tokenizer, prompt=FREE_OCR_PROMPT, image_file=str(image_path), output_path=tmpdir,
-        base_size=train_config.base_size, image_size=train_config.image_size,
-        crop_mode=train_config.crop_mode, save_results=False, test_compress=False, eval_mode=True,
-    )
+    RANGES.pop("save_image")
+    with _capped_generate(model, max_new_tokens):
+        RANGES.push("preprocess")  # closed by the generate() wrapper
+        try:
+            return model.infer(
+                tokenizer, prompt=FREE_OCR_PROMPT, image_file=str(image_path), output_path=tmpdir,
+                base_size=train_config.base_size, image_size=train_config.image_size,
+                crop_mode=train_config.crop_mode, save_results=False, test_compress=False,
+                eval_mode=True,
+            )
+        finally:
+            RANGES.pop("preprocess")  # no-op unless infer() failed before generate()
 
 
-def _measure(label, inner, tokenizer, pages, state, sampler, reference_hyps) -> list[dict]:
+def _label_decode_text(tokenizer) -> None:
+    """infer()'s output detokenization runs through tokenizer.decode."""
+    original = tokenizer.decode
+
+    def decode(*args, **kwargs):
+        RANGES.push("decode_text")
+        try:
+            return original(*args, **kwargs)
+        finally:
+            RANGES.pop("decode_text")
+
+    tokenizer.decode = decode
+
+
+def _measure(label, model, tokenizer, pages, state, sampler, reference_hyps) -> list[dict]:
     import tempfile
 
     import jiwer
     import torch
 
+    inner = _inner(model)
     rows = []
     with tempfile.TemporaryDirectory() as tmpdir, _instrumented_generate(inner, state):
         with _stage("warmup", step=label):
-            _infer(inner, tokenizer, pages["short"]["image"], tmpdir)
+            _infer(model, tokenizer, pages["short"]["image"], tmpdir, state.max_new_tokens)
         for name, page in pages.items():
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            hypothesis = _infer(inner, tokenizer, page["image"], tmpdir)
+            hypothesis = _infer(model, tokenizer, page["image"], tmpdir, state.max_new_tokens)
             torch.cuda.synchronize()
             wall = time.perf_counter() - t0
             gen = state.last
@@ -553,6 +414,7 @@ def _measure(label, inner, tokenizer, pages, state, sampler, reference_hyps) -> 
                 "generate_s": timing.generate_s,
                 "page_wall_s": wall,
                 "preprocess_s": wall - timing.generate_s,
+                "logits_processor_ms_per_step": gen["logits_processor_ms_per_step"],
                 "gpu_util_pct": sampler.util(gen["t_start"], gen["t_end"]),
                 "peak_mem_gb": torch.cuda.max_memory_allocated() / 1e9,
                 "cer_vs_reference": jiwer.cer(page["text"], hypothesis),
@@ -561,64 +423,55 @@ def _measure(label, inner, tokenizer, pages, state, sampler, reference_hyps) -> 
                 "hypothesis": hypothesis,
             }
             logger.info(
-                "%s %s: prefill=%.2fs decode=%s tok/s out=%d wall=%.2fs util=%s match=%s",
+                "%s %s: prefill=%.2fs decode=%s tok/s out=%d wall=%.2fs util=%s proc=%sms match=%s",
                 label, name, row["prefill_s"],
                 f"{row['decode_tok_s']:.1f}" if row["decode_tok_s"] else "n/a",
-                row["output_tokens"], wall, row["gpu_util_pct"], row["matches_baseline"],
+                row["output_tokens"], wall, row["gpu_util_pct"],
+                row["logits_processor_ms_per_step"], row["matches_baseline"],
             )
             rows.append(row)
     return rows
 
 
-def _profile(label, inner, tokenizer, page, state, run_name) -> dict:
-    """torch.profiler on one page -> gzipped Chrome trace + op tables."""
+def _gzip(path: str) -> str:
     import gzip
     import os
     import shutil
-    import tempfile
 
-    import torch
-    from torch.profiler import ProfilerActivity, profile
-
-    os.makedirs(f"{PROFILING_DIR}/traces", exist_ok=True)
-    trace_path = f"{PROFILING_DIR}/traces/{run_name}_{label}.json"
-    saved_cap = state.max_new_tokens
-    state.max_new_tokens = PROFILE_MAX_NEW_TOKENS
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir, _instrumented_generate(inner, state):
-            _infer(inner, tokenizer, page["image"], tmpdir)  # warm
-            with _stage("torch_profiler", step=label), profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                record_shapes=True, with_stack=True,
-            ) as prof:
-                _infer(inner, tokenizer, page["image"], tmpdir)
-            gen = dict(state.last)
-    finally:
-        state.max_new_tokens = saved_cap
-
-    prof.export_chrome_trace(trace_path)
-    with open(trace_path, "rb") as src, gzip.open(trace_path + ".gz", "wb") as dst:
+    with open(path, "rb") as src, gzip.open(path + ".gz", "wb") as dst:
         shutil.copyfileobj(src, dst)
-    os.remove(trace_path)
+    os.remove(path)
+    return path + ".gz"
 
-    averages = prof.key_averages()
-    device_total_us = sum(e.self_device_time_total for e in averages)
-    counts = {e.key: e.count for e in averages}
-    return {
-        "step": label,
-        "trace": trace_path + ".gz",
-        "generate_s": gen["t_end"] - gen["t_start"],
-        "prefill_s": gen["t_first"] - gen["t_start"],
-        "output_tokens": gen["n_output_tokens"],
-        "gpu_kernel_time_s": device_total_us / 1e6,
-        "sync_counts": {
-            k: counts.get(k, 0)
-            for k in ("aten::item", "aten::_local_scalar_dense", "cudaStreamSynchronize",
-                      "cudaMemcpyAsync", "cudaLaunchKernel", "cudaGraphLaunch")
-        },
-        "top_cuda": averages.table(sort_by="self_cuda_time_total", row_limit=25, max_name_column_width=60),
-        "top_cpu": averages.table(sort_by="self_cpu_time_total", row_limit=25, max_name_column_width=60),
-    }
+
+def _apply_step(step: str, model, state: _State):
+    """Apply one optimization (see module docstring); returns the (possibly new) model."""
+    with _stage("apply_step", step=step):
+        if step == "ngram":
+            state.fast_ngram = True
+        elif step == "merge":
+            model = model.merge_and_unload()
+        elif step == "moe_sync":
+            logger.info("patched MoE classes: %d", _patch_moe(model))
+        elif step == "cuda_graph":
+            _patch_moe(model)
+            state.graph_decoder = CudaGraphDecoder(_inner(model))
+        elif step == "batched_moe":  # requires cuda_graph earlier
+            for moe in _moe_modules(model):
+                moe._batched = True
+            state.graph_decoder.graph = None  # re-capture with the new MoE path
+        elif step != "baseline":
+            raise ValueError(f"unknown step {step!r}; choose from {STEPS}")
+    return model
+
+
+def _install_instrumentation(model, tokenizer, state: _State) -> None:
+    """Stage labels (vision / prefill / decode_step / logits processors /
+    decode_text) and per-processor timing. The hooked modules survive
+    PeftModel wrapping and merging."""
+    _install_stage_hooks(_inner(model))
+    _time_logits_processors(state)
+    _label_decode_text(tokenizer)
 
 
 @app.function(
@@ -628,6 +481,8 @@ def _profile(label, inner, tokenizer, page, state, run_name) -> dict:
     secrets=[hf_secret],
 )
 def profile_inference(config: ProfileConfig) -> dict:
+    """3-page timing bench (no traces): every step in `config.steps` applied
+    cumulatively, the fixed pages re-measured after each."""
     import os
 
     import torch
@@ -646,7 +501,7 @@ def profile_inference(config: ProfileConfig) -> dict:
 
     os.makedirs(f"{PROFILING_DIR}/results", exist_ok=True)
     result_path = f"{PROFILING_DIR}/results/{config.run_name}.json"
-    result = {"config": config.model_dump(), "gpu": torch.cuda.get_device_name(), "rows": [], "profiles": []}
+    result = {"config": config.model_dump(), "gpu": torch.cuda.get_device_name(), "rows": []}
 
     def save():
         with open(result_path, "w") as f:
@@ -657,79 +512,351 @@ def profile_inference(config: ProfileConfig) -> dict:
     state = _State(config.max_new_tokens)
     try:
         model, tokenizer = _load(config)
+        _install_instrumentation(model, tokenizer, state)
         if config.measure_base:
-            result["rows"] += _measure("base/baseline", _inner(model), tokenizer, pages, state, sampler, {})
+            result["rows"] += _measure("base/baseline", model, tokenizer, pages, state, sampler, {})
             save()
 
         if config.hf_revision:  # "" = run the steps on the base model, no adapter
             model = _attach_adapter(model, config)
         reference_hyps: dict[str, str] = {}
         for step in config.steps:
-            with _stage("apply_step", step=step):
-                if step == "ngram":
-                    state.fast_ngram = True
-                elif step == "merge":
-                    model = model.merge_and_unload()
-                elif step == "moe_sync":
-                    logger.info("patched MoE classes: %d", _patch_moe(model))
-                elif step == "cuda_graph":
-                    _patch_moe(model)
-                    state.graph_decoder = CudaGraphDecoder(_inner(model))
-                elif step == "batched_moe":  # requires cuda_graph earlier in the run
-                    for moe in _moe_modules(model):
-                        moe._batched = True
-                    state.graph_decoder.graph = None  # re-capture with the new MoE path
-            inner = _inner(model)
-            rows = _measure(step, inner, tokenizer, pages, state, sampler, reference_hyps)
+            model = _apply_step(step, model, state)
+            rows = _measure(step, model, tokenizer, pages, state, sampler, reference_hyps)
             # Every later step in this run is compared to the first one.
             reference_hyps = reference_hyps or {r["page"]: r["hypothesis"] for r in rows}
             result["rows"] += rows
             save()
-            if step in config.profile_steps:
-                result["profiles"].append(
-                    _profile(step, inner, tokenizer, pages[PROFILE_PAGE], state, config.run_name)
-                )
-                save()
     finally:
         sampler.stop()
     return result
 
 
+# --- single-page profiler (docs/plans/profiling.md, modes generate/forward) --
+
+
+class DecodingConfig(BaseModel):
+    """Overrides for the generate() kwargs infer() hardcodes (eval_mode:
+    greedy, no_repeat_ngram_size=35, eos_token_id=tokenizer.eos_token_id).
+    None keeps infer()'s value. Same fields as the DecodingConfig being added
+    to training/config.py on main (kept local here to avoid a conflict)."""
+
+    no_repeat_ngram_size: int | None = None
+    repetition_penalty: float | None = None
+    eos_token_id: int | None = None
+
+
+class PageProfileConfig(BaseModel):
+    run_name: str
+    mode: str = "generate"  # "generate": one model.infer(); "forward": prompt forward only
+    split: str = "test"
+    index: int = 0
+    model_source: ModelSource = ModelSource.BASE
+    hf_revision: str | None = None  # required for model_source=artifact
+    merge_adapter: bool = False
+    max_new_tokens: int = 64
+    decoding: DecodingConfig = DecodingConfig()
+    with_stack: bool = True
+    # Optional speedups from STEPS (e.g. ["moe_sync", "cuda_graph",
+    # "batched_moe"]) applied before the pass, to profile the fast path too.
+    optimizations: list[str] = []
+    log_wandb: bool = True
+
+
+def _load_for_profile(config: PageProfileConfig):
+    """Model load with the existing eval functions, as `evaluate()` does."""
+    from unsloth import FastVisionModel
+
+    from cartridges.training.finetune import _load_artifact_model, _load_base_model
+
+    if config.model_source == ModelSource.ARTIFACT:
+        if not config.hf_revision:
+            raise ValueError("hf_revision is required when model_source='artifact'")
+        model, tokenizer = _load_artifact_model(
+            EvalConfig(model_source=ModelSource.ARTIFACT, hf_revision=config.hf_revision)
+        )
+    else:
+        model, tokenizer = _load_base_model(TrainConfig())
+    merge_s = None
+    if config.merge_adapter:
+        if config.model_source != ModelSource.ARTIFACT:
+            raise ValueError("merge_adapter needs model_source='artifact'")
+        start = time.monotonic()
+        with _stage("merge_adapter", hf_revision=config.hf_revision):
+            model = model.merge_and_unload()  # into the bf16 weights of this fresh load
+        merge_s = time.monotonic() - start
+    FastVisionModel.for_inference(model)  # as _run_inference does
+    return model, tokenizer, merge_s
+
+
+def _flat_numbers(d: dict, prefix: str = "") -> dict[str, float]:
+    out = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.update(_flat_numbers(v, key + "/"))
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[key] = v
+    return out
+
+
+@app.function(
+    gpu="A100",
+    timeout=20 * MINUTES,
+    # a with_stack Chrome trace of a 64-token eager decode is ~1 GB of JSON
+    # before gzip; trace_stats() loads it whole
+    memory=32 * 1024,
+    volumes={"/cache": model_cache},
+    secrets=[hf_secret, wandb_secret],
+)
+def profile_page(config: PageProfileConfig) -> dict:
+    """One page, one recorded pass -> /cache/profiling/<run_name>/:
+    trace.json.gz, stacks_cpu.folded, stacks_gpu.folded, stages.json, ops.txt,
+    gpu.csv, output.txt, report.html."""
+    import os
+    import tempfile
+
+    import torch
+    from datasets import load_from_disk
+    from torch.profiler import ProfilerActivity, profile
+
+    from cartridges.training.perf_metrics import stage_coverage, step_durations, summarize, trace_stats
+    from cartridges.training.profile_page_report import render_report
+
+    if config.mode not in ("generate", "forward"):
+        raise ValueError("mode must be 'generate' or 'forward' (train-step lives in profiling_train.py)")
+    out_dir = f"{PROFILING_DIR}/{config.run_name}"
+    os.makedirs(out_dir, exist_ok=True)
+
+    with _stage("load_page", split=config.split, index=config.index):
+        page = load_from_disk(TrainConfig().dataset_dir)[config.split][config.index]
+    load_start = time.monotonic()
+    model, tokenizer, merge_s = _load_for_profile(config)
+    load_s = time.monotonic() - load_start
+
+    state = _State(config.max_new_tokens)
+    state.decoding = config.decoding.model_dump(exclude_none=True)
+    state.forward_only = config.mode == "forward"
+    _install_instrumentation(model, tokenizer, state)
+    for step in config.optimizations:
+        model = _apply_step(step, model, state)
+
+    def timed_infer(tmpdir: str, cap: int):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        text = _infer(model, tokenizer, page["image"], tmpdir, cap)
+        torch.cuda.synchronize()
+        return text, t0, time.perf_counter()
+
+    def decode_tok_s(gen: dict) -> float | None:
+        return GenerationTiming(gen["t_start"], gen["t_first"], gen["t_end"], gen["n_output_tokens"]).decode_tok_s
+
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+    inner = _inner(model)
+    with tempfile.TemporaryDirectory() as tmpdir, _instrumented_generate(inner, state):
+        with _stage("warmup", max_new_tokens=8):
+            _infer(model, tokenizer, page["image"], tmpdir, 8)
+        with _stage("unprofiled_pass", max_new_tokens=config.max_new_tokens):
+            unprofiled_text, _, _ = timed_infer(tmpdir, config.max_new_tokens)
+            unprofiled = dict(state.last)
+        torch.cuda.reset_peak_memory_stats()
+        sampler = GpuSampler(interval_ms=50)
+        try:
+            # Timeline pass: no Python stacks. A with_stack Chrome trace of
+            # 64 eager decode steps (~250k events) took >10 min to export.
+            with _stage("profiled_pass", record_shapes=True), profile(
+                activities=activities, record_shapes=True
+            ) as prof:
+                text, t0, t1 = timed_infer(tmpdir, config.max_new_tokens)
+        finally:
+            sampler.stop()
+        gen = dict(state.last)
+        stack_prof = None
+        if config.with_stack:
+            # Separate pass for the flame graphs only (stack capture also
+            # inflates CPU timings, so it stays out of the timeline above).
+            with _stage("stack_pass"), profile(
+                activities=activities, with_stack=True,
+                # without verbose=True, export_stacks writes empty files
+                experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
+            ) as stack_prof:
+                stack_text, _, _ = timed_infer(tmpdir, config.max_new_tokens)
+
+    with _stage("write_outputs", out_dir=out_dir):
+        with open(f"{out_dir}/output.txt", "w") as f:
+            f.write(text)
+        prof.export_chrome_trace(f"{out_dir}/trace.json")
+        with open(f"{out_dir}/trace.json") as f:
+            stats = trace_stats(json.load(f)["traceEvents"])
+        _gzip(f"{out_dir}/trace.json")
+        if stack_prof is not None:
+            stack_prof.export_stacks(f"{out_dir}/stacks_cpu.folded", "self_cpu_time_total")
+            stack_prof.export_stacks(f"{out_dir}/stacks_gpu.folded", "self_cuda_time_total")
+        averages = prof.key_averages()
+        with open(f"{out_dir}/ops.txt", "w") as f:
+            f.write("Top 30 by self CPU time\n")
+            f.write(averages.table(sort_by="self_cpu_time_total", row_limit=30, max_name_column_width=70))
+            f.write("\n\nTop 30 by self CUDA time\n")
+            f.write(averages.table(sort_by="self_cuda_time_total", row_limit=30, max_name_column_width=70))
+        gpu_rows = [(t - t0, util, mem) for t, util, mem in sampler.samples if t0 - 0.5 <= t <= t1 + 0.5]
+        with open(f"{out_dir}/gpu.csv", "w") as f:
+            f.write("t_s,util_pct,mem_mib\n")
+            f.writelines(f"{t:.3f},{u:.0f},{m:.0f}\n" for t, u, m in gpu_rows)
+
+        steps_s = step_durations(gen["lm_call_times"][1:], gen["t_end"])
+        stage_ms = stats.pop("stage_ms")
+        wall_ms = 1e3 * (t1 - t0)
+        stages = {
+            "config": config.model_dump(mode="json"),
+            "gpu": torch.cuda.get_device_name(),
+            "load_s": load_s,
+            "merge_s": merge_s,
+            "wall_ms": wall_ms,
+            "ttft_ms": 1e3 * (gen["t_first"] - gen["t_start"]),
+            "prompt_tokens": gen["n_prompt_tokens"],
+            "output_tokens": gen["n_output_tokens"],
+            "stage_ms": stage_ms,
+            "stage_coverage": stage_coverage(stage_ms, wall_ms),
+            "decode_step_ms": summarize([1e3 * s for s in steps_s]),
+            "decode_step_ms_all": [round(1e3 * s, 3) for s in steps_s],
+            "logits_processor_ms_per_step": gen["processor_ms_per_step"],
+            "trace_stats": stats,
+            "gpu_util_mean_pct": mean_in_window([(t, u) for t, u, _ in gpu_rows], 0.0, t1 - t0),
+            "decode_tok_s_profiled": decode_tok_s(gen),
+            "decode_tok_s_unprofiled": decode_tok_s(unprofiled),
+            "output_matches_unprofiled": text == unprofiled_text,
+            "stack_pass_output_matches": (stack_text == unprofiled_text) if stack_prof is not None else None,
+            "peak_mem_gb": torch.cuda.max_memory_allocated() / 1e9,
+        }
+        with open(f"{out_dir}/stages.json", "w") as f:
+            json.dump(stages, f, indent=1)
+        with open(f"{out_dir}/report.html", "w") as f:
+            f.write(render_report(stages, gpu_rows, open(f"{out_dir}/ops.txt").read()))
+        model_cache.commit()
+
+    if config.log_wandb:
+        # Summary numbers only -- no traces, no page text.
+        with _stage("log_wandb", group="infra-profiling"):
+            import wandb
+
+            run = wandb.init(
+                entity=WANDB_ENTITY, project=WANDB_PROJECT, group="infra-profiling",
+                name=config.run_name, job_type="profile", config=config.model_dump(mode="json"),
+            )
+            run.summary.update(_flat_numbers({k: v for k, v in stages.items() if k not in ("config", "decode_step_ms_all")}))
+            run.finish()
+
+    logger.info(
+        "profile %s: wall=%.0fms ttft=%.0fms steps=%s coverage=%s match_unprofiled=%s stats=%s",
+        config.run_name, wall_ms, stages["ttft_ms"], stages["decode_step_ms"], stages["stage_coverage"],
+        stages["output_matches_unprofiled"], stats,
+    )
+    return {k: v for k, v in stages.items() if k != "decode_step_ms_all"}
+
+
+# --- local entrypoints / CLI -------------------------------------------------
+
+
+def _split(s: str) -> list[str]:
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
 @app.local_entrypoint()
 def run_profile(
+    run_name: str,
+    mode: str = "generate",
+    split: str = "test",
+    index: int = 0,
+    model_source: str = "base",
+    hf_revision: str = "",
+    merge_adapter: bool = False,
+    max_new_tokens: int = 64,
+    no_repeat_ngram_size: int = -1,  # -1 = keep infer()'s value (35)
+    repetition_penalty: float = -1.0,  # -1 = keep infer()'s value (none)
+    eos_token_id: int = -1,  # -1 = keep infer()'s value
+    with_stack: bool = True,
+    optimizations: str = "",
+    log_wandb: bool = True,
+):
+    """Single-page profiler (docs/plans/profiling.md). Spawns the job, polls
+    with short reconnects, then copies the outputs to profiles/<run_name>/.
+    With --detach the job survives a dropped client; re-fetch with
+    `python -m cartridges.training.profiling fetch <run_name>`."""
+    decoding = DecodingConfig(
+        no_repeat_ngram_size=None if no_repeat_ngram_size < 0 else no_repeat_ngram_size,
+        repetition_penalty=None if repetition_penalty < 0 else repetition_penalty,
+        eos_token_id=None if eos_token_id < 0 else eos_token_id,
+    )
+    config = PageProfileConfig(
+        run_name=run_name, mode=mode, split=split, index=index, model_source=ModelSource(model_source),
+        hf_revision=hf_revision or None, merge_adapter=merge_adapter, max_new_tokens=max_new_tokens,
+        decoding=decoding, with_stack=with_stack, optimizations=_split(optimizations), log_wandb=log_wandb,
+    )
+    call = profile_page.spawn(config)
+    print(f"CALL_ID {call.object_id}", flush=True)
+    _wait(call.object_id)
+    _fetch(run_name)
+
+
+@app.local_entrypoint()
+def run_bench(
     run_name: str,
     loader: str = "unsloth",
     steps: str = "baseline",
     measure_base: bool = False,
-    profile_steps: str = "",
     hf_revision: str = "run-liw4qzol",
     all_test_pages: bool = False,
 ):
-    split = lambda s: [x.strip() for x in s.split(",") if x.strip()]  # noqa: E731
+    """3-page timing bench across cumulative optimization steps (detached; poll it)."""
     config = ProfileConfig(
-        run_name=run_name, loader=loader, steps=split(steps), measure_base=measure_base,
-        profile_steps=split(profile_steps), hf_revision=hf_revision, all_test_pages=all_test_pages,
+        run_name=run_name, loader=loader, steps=_split(steps), measure_base=measure_base,
+        hf_revision=hf_revision, all_test_pages=all_test_pages,
     )
     call = profile_inference.spawn(config)
     print(f"CALL_ID {call.object_id}")
 
 
-def _poll(call_id: str, out_path: str) -> None:
+def _wait(call_id: str):
     """Short reconnects instead of one long blocking .get() (see finetune.py's
     note on dropped long-lived connections)."""
     while True:
         try:
-            result = modal.FunctionCall.from_id(call_id).get(timeout=60)
-            break
+            return modal.FunctionCall.from_id(call_id).get(timeout=60)
         except TimeoutError:
             print("still running...", flush=True)
+
+
+def _poll(call_id: str, out_path: str) -> None:
+    result = _wait(call_id)
     with open(out_path, "w") as f:
         json.dump(result, f, indent=1)
     print(f"wrote {out_path}")
 
 
+def _fetch(run_name: str, local_root: str = "profiles") -> None:
+    """Copy /cache/profiling/<run_name>/ from the volume to profiles/<run_name>/."""
+    from pathlib import Path
+
+    volume = modal.Volume.from_name("cartridges-training-cache")
+    remote = f"profiling/{run_name}"
+    for entry in volume.listdir(remote, recursive=True):
+        if entry.type != modal.volume.FileEntryType.FILE:
+            continue
+        dest = Path(local_root) / run_name / Path(entry.path).relative_to(remote)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as f:
+            for chunk in volume.read_file(entry.path):
+                f.write(chunk)
+        print(f"fetched {dest}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "poll":
         _poll(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "fetch":
+        _fetch(sys.argv[2])
     else:
-        sys.exit("usage: python -m cartridges.training.profiling poll <CALL_ID> <out.json>")
+        sys.exit(
+            "usage: python -m cartridges.training.profiling poll <CALL_ID> <out.json>\n"
+            "       python -m cartridges.training.profiling fetch <run_name>"
+        )
