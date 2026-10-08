@@ -68,6 +68,8 @@ class ProfileConfig(BaseModel):
     steps: list[str] = ["baseline"]
     # Also measure the base model (no adapter) at baseline before attaching it.
     measure_base: bool = False
+    # Any `run-<wandb_id>` tag (or branch/sha) in TrainConfig.hf_repo_id;
+    # attached unmerged to a fresh base load. "" = base model only.
     hf_revision: str = "run-liw4qzol"
     profile_steps: list[str] = []
     # Same clamp `_capped_generate` applies on the current eval path.
@@ -659,7 +661,8 @@ def profile_inference(config: ProfileConfig) -> dict:
             result["rows"] += _measure("base/baseline", _inner(model), tokenizer, pages, state, sampler, {})
             save()
 
-        model = _attach_adapter(model, config)
+        if config.hf_revision:  # "" = run the steps on the base model, no adapter
+            model = _attach_adapter(model, config)
         reference_hyps: dict[str, str] = {}
         for step in config.steps:
             with _stage("apply_step", step=step):
