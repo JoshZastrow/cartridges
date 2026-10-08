@@ -35,28 +35,47 @@ def count_pdf_pages(input_path: Path) -> int:
 
 
 @task
-def transcribe_pdf_page(
+def extract_page_text(
     input_path: Path,
     page_number: int,
-    total_pages: int,
     *,
     engine: OCR_ENGINE_KINDS = "model",
     model: str = "",
     dpi: int = 400,
 ) -> str:
-    from cartridges.datagen.loaders import pdf_page_to_markdown
+    from cartridges.datagen.loaders import pdf_page_to_text
 
     logger = get_run_logger()
-    logger.info("Transcribing page %s/%s with %s", page_number, total_pages, engine)
-    section = pdf_page_to_markdown(
+    logger.info("Extracting text for page %s with %s", page_number, engine)
+    text = pdf_page_to_text(
         input_path,
         page_number,
         engine=engine,
         model_name=model or None,
         dpi=dpi,
     )
-    logger.info("Finished page %s/%s", page_number, total_pages)
-    return section
+    logger.info("Finished extracting text for page %s", page_number)
+    return text
+
+
+@task
+def extract_page_date(page_number: int, text: str, *, model: str = "") -> str:
+    from cartridges.processors.extraction import GEMMA_MODEL_NAME, extract_date
+
+    logger = get_run_logger()
+    logger.info("Extracting date for page %s", page_number)
+    date = extract_date(text, model_name=model or GEMMA_MODEL_NAME)
+    logger.info("Finished extracting date for page %s: %s", page_number, date)
+    return date
+
+
+@task
+def combine_page_sections(pages: list[tuple[int, str, str]]) -> str:
+    from cartridges.datagen.loaders import format_pdf_page
+
+    ordered = sorted(pages, key=lambda item: item[0])
+    sections = [format_pdf_page(page_number, text, date) for page_number, text, date in ordered]
+    return "\n---\n".join(section.rstrip() for section in sections) + "\n"
 
 
 @task
@@ -85,16 +104,6 @@ def merge_markdown_sections(existing_sections: list[str], new_markdown: str) -> 
 
     sections = existing_sections + split_markdown_pages(new_markdown)
     return "\n---\n".join(section.rstrip() for section in sections) + "\n"
-
-
-@task
-def append_markdown_section(output_path: Path, section: str) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    separator = "\n---\n" if output_path.exists() and output_path.read_text().strip() else ""
-    with output_path.open("a") as file:
-        file.write(separator)
-        file.write(section.rstrip())
-        file.write("\n")
 
 
 @task
@@ -128,6 +137,7 @@ def prepare_data_flow(
     *,
     engine: OCR_ENGINE_KINDS = "model",
     model: str = "",
+    date_model: str = "",
     use_agent: bool = False,
     dpi: int = 250,
 ) -> None:
@@ -160,22 +170,33 @@ def prepare_data_flow(
             len(existing_sections),
             total_pages,
         )
-        for page_number in range(len(existing_sections) + 1, total_pages + 1):
-            section = transcribe_pdf_page(
-                input_path,
-                page_number,
-                total_pages,
-                engine=engine,
-                model=model,
-                dpi=dpi,
+
+        # Get the page indices to work on up front, then fan a pair of
+        # chained tasks (text, then date) out per page. A page's date
+        # extraction starts as soon as its own text is ready, rather than
+        # waiting on a full-pass barrier.
+        page_numbers = list(range(len(existing_sections) + 1, total_pages + 1))
+        text_futures = {
+            page_number: extract_page_text.submit(
+                input_path, page_number, engine=engine, model=model, dpi=dpi
             )
-            append_markdown_section(output_path, section)
-            checkpoint_sections = read_existing_sections(output_path)
-            if len(checkpoint_sections) != page_number:
-                raise ValueError(
-                    f"expected {page_number} sections after page {page_number}, "
-                    f"found {len(checkpoint_sections)}"
-                )
+            for page_number in page_numbers
+        }
+        date_futures = {
+            page_number: extract_page_date.submit(
+                page_number, text_futures[page_number], model=date_model
+            )
+            for page_number in page_numbers
+        }
+        new_pages = [
+            (page_number, text_futures[page_number].result(), date_futures[page_number].result())
+            for page_number in page_numbers
+        ]
+        if new_pages:
+            new_markdown = combine_page_sections(new_pages)
+            merged = merge_markdown_sections(existing_sections, new_markdown)
+            write_markdown(output_path, merged)
+
         final_sections = read_existing_sections(output_path)
         if len(final_sections) != total_pages:
             raise ValueError(

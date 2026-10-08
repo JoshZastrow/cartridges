@@ -36,7 +36,7 @@ def pdf_page_count(path: Path) -> int:
     return _pdf_page_count(path)
 
 
-def pdf_page_to_markdown(
+def pdf_page_to_text(
     path: Path,
     page_number: int,
     *,
@@ -45,13 +45,24 @@ def pdf_page_to_markdown(
     dpi: int = 400,
 ) -> str:
     image = pdf_page_to_image(path, page_number, dpi=dpi)
-    text = transcribe_image(
+    return transcribe_image(
         image,
         engine=engine,
         model_name=model_name,
         source_path=str(path),
         source_mtime=path.stat().st_mtime,
     )
+
+
+def pdf_page_to_markdown(
+    path: Path,
+    page_number: int,
+    *,
+    engine: OCR_ENGINE_KINDS = "model",
+    model_name: str | None = None,
+    dpi: int = 400,
+) -> str:
+    text = pdf_page_to_text(path, page_number, engine=engine, model_name=model_name, dpi=dpi)
     return format_pdf_page(page_number, text)
 
 
