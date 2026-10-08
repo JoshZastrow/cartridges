@@ -50,7 +50,7 @@ PROFILE_PAGE = "median"
 # trace; 48 decode steps is plenty to see the per-step pattern.
 PROFILE_MAX_NEW_TOKENS = 48
 
-STEPS = ("baseline", "ngram", "merge", "moe_sync", "cuda_graph")
+STEPS = ("baseline", "ngram", "merge", "moe_sync", "cuda_graph", "batched_moe")
 
 app = modal.App("cartridges-profiling", image=image)
 
@@ -67,6 +67,9 @@ class ProfileConfig(BaseModel):
     profile_steps: list[str] = []
     # Same clamp `_capped_generate` applies on the current eval path.
     max_new_tokens: int = 1024
+    # Measure every test-split page, not just the 3 fixed ones (a corpus-level
+    # CER check that a speedup didn't change transcription quality).
+    all_test_pages: bool = False
 
 
 # --- GPU utilization sampling ----------------------------------------------
@@ -202,6 +205,35 @@ def _instrumented_generate(inner, state: _State):
 # --- optimizations -----------------------------------------------------------
 
 
+def _expert_linear(x, stacked: dict, name: str, idx):
+    """One expert projection for one token, replicating what the eager path
+    runs: `F.linear(x, W)` and, for an unmerged PEFT LoRA layer,
+    `result + lora_B(lora_A(x)) * scaling`. `idx` is a 1-element CUDA index
+    tensor; index_select (not `W[idx]`) keeps the gather free of host syncs."""
+    import torch
+    import torch.nn.functional as F
+
+    out = F.linear(x, torch.index_select(stacked[name], 0, idx)[0])
+    if name + ".A" in stacked:
+        lora_a = torch.index_select(stacked[name + ".A"], 0, idx)[0]
+        lora_b = torch.index_select(stacked[name + ".B"], 0, idx)[0]
+        out = out + F.linear(F.linear(x, lora_a), lora_b) * stacked[name + ".scaling"]
+    return out
+
+
+def _batched_linear(x, stacked: dict, name: str, idx):
+    """`_expert_linear` for all k routed experts at once: x [k, in] -> [k, out]."""
+    import torch
+
+    def bmm(weights, inputs):
+        return torch.bmm(torch.index_select(weights, 0, idx), inputs[..., None])[..., 0]
+
+    out = bmm(stacked[name], x)
+    if name + ".A" in stacked:
+        out = out + bmm(stacked[name + ".B"], bmm(stacked[name + ".A"], x)) * stacked[name + ".scaling"]
+    return out
+
+
 def _moe_one_sync(self, hidden_states, topk_ids, topk_weight):
     """transformers' DeepseekV2MoE.moe with two changes:
 
@@ -209,20 +241,41 @@ def _moe_one_sync(self, hidden_states, topk_ids, topk_weight):
        (`if num_tokens == 0` on each element = one blocking GPU->CPU sync per
        expert: 64 experts x 11 MoE layers ~ 700 syncs per decoded token).
        Same math, bit-identical outputs.
-    2. If `CudaGraphDecoder` stacked the expert weights (`_w_gate_up`/`_w_down`)
-       and this is a single token, gather the top-k experts' weights and run
-       them as two batched matmuls: no host sync and static shapes, so the
-       decode step can be captured in a CUDA graph.
+    2. If `CudaGraphDecoder` stacked the expert weights (`_stacked`) and this
+       is a single token, run the top-k experts from gathered weights: same
+       per-expert ops as eager (LoRA left unmerged), but no host sync and
+       static shapes, so the decode step can be captured in a CUDA graph.
     """
     import torch
 
-    if hidden_states.shape[0] == 1 and getattr(self, "_w_gate_up", None) is not None:
+    stacked = getattr(self, "_stacked", None)
+    if hidden_states.shape[0] == 1 and stacked is not None and getattr(self, "_batched", False):
+        # All k routed experts at once: gather [k, out, in] weights, bmm.
+        # ~6x fewer kernels than the per-expert path below; same math up to
+        # matmul accumulation order (LoRA still unmerged).
         idx = topk_ids[0]
-        x = hidden_states[0][None, :, None].expand(idx.shape[0], -1, -1)
-        gate, up = torch.bmm(self._w_gate_up[idx], x)[..., 0].chunk(2, dim=-1)
-        act = self.experts[0].act_fn(gate) * up
-        out = torch.bmm(self._w_down[idx], act[..., None])[..., 0]  # [k, hidden]
+        x = hidden_states.expand(idx.shape[0], -1)
+        act = self.experts[0].act_fn(_batched_linear(x, stacked, "gate_proj", idx))
+        h = act * _batched_linear(x, stacked, "up_proj", idx)
+        out = _batched_linear(h, stacked, "down_proj", idx)  # [k, hidden]
         return (out.type(topk_weight.dtype) * topk_weight[0, :, None]).sum(0, keepdim=True).type(out.dtype)
+
+    if hidden_states.shape[0] == 1 and stacked is not None:
+        act_fn = self.experts[0].act_fn
+        outs = []
+        for j in range(topk_ids.shape[1]):
+            idx = topk_ids[0, j : j + 1]
+            gate = _expert_linear(hidden_states, stacked, "gate_proj", idx)
+            up = _expert_linear(hidden_states, stacked, "up_proj", idx)
+            outs.append(_expert_linear(act_fn(gate) * up, stacked, "down_proj", idx))
+        out = torch.cat(outs, dim=0)  # [k, hidden], in topk order like eager's new_x
+        return (
+            out.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(out.dtype)
+        )
 
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
     cnts.scatter_(1, topk_ids, 1)
@@ -288,24 +341,24 @@ class CudaGraphDecoder:
         self._stack_expert_weights()
 
     def _stack_expert_weights(self):
-        """Stack each MoE layer's expert weights into [E, 2I, H] / [E, H, I]
-        tensors and re-point the expert Linears at views of them (no extra
-        memory, prefill keeps using the per-expert modules)."""
+        """Stack each MoE layer's per-expert weights ([E, out, in]), plus the
+        LoRA A/B matrices if the adapter is still unmerged, so the decode
+        step can gather the routed experts without leaving the GPU. Prefill
+        keeps using the per-expert modules (copies, ~5 GB extra in bf16)."""
         import torch
 
         for moe in _moe_modules(self.model):
-            experts = moe.experts
-            w_gate_up = torch.stack(
-                [torch.cat([e.gate_proj.weight, e.up_proj.weight], dim=0) for e in experts]
-            ).contiguous()
-            w_down = torch.stack([e.down_proj.weight for e in experts]).contiguous()
-            inter = experts[0].gate_proj.weight.shape[0]
-            for i, e in enumerate(experts):
-                e.gate_proj.weight = torch.nn.Parameter(w_gate_up[i, :inter], requires_grad=False)
-                e.up_proj.weight = torch.nn.Parameter(w_gate_up[i, inter:], requires_grad=False)
-                e.down_proj.weight = torch.nn.Parameter(w_down[i], requires_grad=False)
-            moe._w_gate_up, moe._w_down = w_gate_up, w_down
-        torch.cuda.empty_cache()
+            stacked = {}
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                layers = [getattr(e, name) for e in moe.experts]
+                if hasattr(layers[0], "base_layer"):  # unmerged PEFT lora.Linear
+                    stacked[name] = torch.stack([l.base_layer.weight for l in layers])
+                    stacked[name + ".A"] = torch.stack([l.lora_A["default"].weight for l in layers])
+                    stacked[name + ".B"] = torch.stack([l.lora_B["default"].weight for l in layers])
+                    stacked[name + ".scaling"] = layers[0].scaling["default"]
+                else:
+                    stacked[name] = torch.stack([l.weight for l in layers])
+            moe._stacked = stacked
 
     def _step(self):
         from transformers import DeepseekV2Model
@@ -348,17 +401,29 @@ class CudaGraphDecoder:
         if prompt_len + max_new_tokens > self.MAX_CACHE_LEN:
             raise ValueError(f"prompt {prompt_len} + {max_new_tokens} new tokens > {self.MAX_CACHE_LEN}")
 
-        self.cache.reset()
+        # Prefill exactly as HF generate does it (dynamic cache, all-ones
+        # attention mask -> causal SDPA), then copy K/V into the static cache;
+        # prefilling straight into the static cache would use a masked
+        # attention kernel and already perturb the first token's logits.
+        from transformers import DynamicCache
+
+        dynamic = DynamicCache()
         prefill = self.model(
             input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            position_ids=torch.arange(prompt_len, device=input_ids.device)[None],
             images=images,
             images_seq_mask=images_seq_mask,
             images_spatial_crop=images_spatial_crop,
-            past_key_values=self.cache,
-            position_ids=torch.arange(prompt_len, device=input_ids.device)[None],
+            past_key_values=dynamic,
             use_cache=True,
         )
         logits = prefill.logits[:, -1]
+        self.cache.reset()
+        for static_layer, dynamic_layer in zip(self.cache.layers, dynamic.layers):
+            static_layer.keys[:, :, :prompt_len].copy_(dynamic_layer.keys)
+            static_layer.values[:, :, :prompt_len].copy_(dynamic_layer.values)
+        del dynamic, prefill
         timer.mark()
 
         blocker = NoRepeatNGramBlocker(no_repeat_ngram_size, input_ids[0].tolist()) if no_repeat_ngram_size else None
@@ -567,7 +632,10 @@ def profile_inference(config: ProfileConfig) -> dict:
 
     with _stage("load_dataset", split="test"):
         test = load_from_disk(TrainConfig().dataset_dir)["test"]
-        pages = {name: {"index": i, **test[i]} for name, i in PAGES.items()}
+        page_indices = dict(PAGES)
+        if config.all_test_pages:
+            page_indices.update({f"test_{i}": i for i in range(len(test)) if i not in PAGES.values()})
+        pages = {name: {"index": i, **test[i]} for name, i in page_indices.items()}
 
     os.makedirs(f"{PROFILING_DIR}/results", exist_ok=True)
     result_path = f"{PROFILING_DIR}/results/{config.run_name}.json"
@@ -599,6 +667,10 @@ def profile_inference(config: ProfileConfig) -> dict:
                 elif step == "cuda_graph":
                     _patch_moe(model)
                     state.graph_decoder = CudaGraphDecoder(_inner(model))
+                elif step == "batched_moe":  # requires cuda_graph earlier in the run
+                    for moe in _moe_modules(model):
+                        moe._batched = True
+                    state.graph_decoder.graph = None  # re-capture with the new MoE path
             inner = _inner(model)
             rows = _measure(step, inner, tokenizer, pages, state, sampler, reference_hyps)
             # Every later step in this run is compared to the first one.
@@ -623,11 +695,12 @@ def run_profile(
     measure_base: bool = False,
     profile_steps: str = "",
     hf_revision: str = "run-liw4qzol",
+    all_test_pages: bool = False,
 ):
     split = lambda s: [x.strip() for x in s.split(",") if x.strip()]  # noqa: E731
     config = ProfileConfig(
         run_name=run_name, loader=loader, steps=split(steps), measure_base=measure_base,
-        profile_steps=split(profile_steps), hf_revision=hf_revision,
+        profile_steps=split(profile_steps), hf_revision=hf_revision, all_test_pages=all_test_pages,
     )
     call = profile_inference.spawn(config)
     print(f"CALL_ID {call.object_id}")
