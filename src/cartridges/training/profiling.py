@@ -6,18 +6,23 @@ optimization steps, re-measuring the same 3 fixed test pages after each:
 
     baseline   the current path: model.infer(), HF generate, HF no_repeat_ngram
     ngram      HF's NoRepeatNGramLogitsProcessor -> exact incremental equivalent
-    merge      fold the LoRA into the base weights (merge_and_unload)
+    merge      fold the LoRA into the base weights (merge_and_unload) -- fast, but
+               changes greedy outputs; the fast path below leaves it unmerged
     moe_sync   MoE expert loop: one GPU->CPU sync per layer instead of per expert
     cuda_graph static KV cache + the 1-token decode step captured as a CUDA graph
+               (routed experts run per-expert from stacked weights, LoRA unmerged)
+    batched_moe  inside the graph, run the k routed experts as batched matmuls
 
 Every step still goes through the model's own `infer()` (same prompt build,
 image tiling, and output decoding) -- only `generate()` underneath it changes,
 so outputs are directly comparable to the current path.
 
-Run (detached; prints a CALL_ID to poll):
+Run (detached; prints a CALL_ID to poll). The fastest output-preserving path
+measured (Unsloth load, unmerged adapter, ~124 decode tok/s on an A100):
 uv run modal run --detach -m cartridges.training.profiling::run_profile \\
-    --loader unsloth --steps baseline,ngram,merge,moe_sync --run-name unsloth
-uv run python -m cartridges.training.profiling poll <CALL_ID> profiles/unsloth.json
+    --run-name fast --loader unsloth --steps moe_sync,cuda_graph,batched_moe
+uv run python -m cartridges.training.profiling poll <CALL_ID> profiles/fast.json
+uv run python -m cartridges.training.profiling_report profiles/fast.json
 """
 
 from __future__ import annotations
@@ -616,7 +621,7 @@ def _profile(label, inner, tokenizer, page, state, run_name) -> dict:
 
 @app.function(
     gpu="A100",  # same GPU as evaluate()
-    timeout=90 * MINUTES,
+    timeout=4 * 60 * MINUTES,  # all_test_pages runs the slow current path twice
     volumes={"/cache": model_cache},
     secrets=[hf_secret],
 )
