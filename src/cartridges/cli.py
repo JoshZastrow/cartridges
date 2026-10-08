@@ -56,6 +56,62 @@ class Cli:
         pages[page_number - 1].save(output)
         logger.info("wrote %s", output)
 
+    def ocr(
+        self,
+        image_path: str,
+        page_number: int = 1,
+        hf_revision: str = "",
+        dpi: int = 400,
+        max_new_tokens: int = 1024,
+    ) -> None:
+        """Transcribe a single image (or one page of a PDF) via the hosted model.
+
+        image_path: a .png/.jpg file, or a .pdf (page_number selects which page,
+        1-indexed). hf_revision: optional Hugging Face Hub revision (e.g.
+        "run-<wandb_run_id>" or "date-2026-09-22") in the fine-tuned adapter
+        repo (see TrainConfig.hf_repo_id) to use instead of the base model.
+        Prints the transcribed text to stdout.
+        """
+        import base64
+        import io
+
+        from cartridges.serve.inference import app, generate
+        from cartridges.serve.schema import ChatMessage, GenerateRequest, ImageContent, ServeConfig
+        from cartridges.training.config import ModelSource
+
+        path = Path(image_path)
+        if path.suffix.lower() == ".pdf":
+            from cartridges.processors.ocr import pdf_to_images
+
+            pages = pdf_to_images(path, dpi=dpi)
+            if not (1 <= page_number <= len(pages)):
+                raise ValueError(f"page_number must be 1..{len(pages)}")
+            buf = io.BytesIO()
+            pages[page_number - 1].save(buf, format="PNG")
+            image_bytes = buf.getvalue()
+        else:
+            image_bytes = path.read_bytes()
+
+        request = GenerateRequest(
+            serve_config=ServeConfig(
+                model_source=ModelSource.ARTIFACT if hf_revision else ModelSource.BASE,
+                hf_revision=hf_revision or None,
+                max_new_tokens=max_new_tokens,
+            ),
+            messages=[
+                ChatMessage(content=[ImageContent(image_base64=base64.b64encode(image_bytes).decode())])
+            ],
+        )
+
+        with app.run():
+            response = generate.remote(request)
+
+        print(response.text)
+        logger.info(
+            "ocr done: model_source=%s hf_revision=%s total_s=%.1f",
+            response.model_source, response.hf_revision, response.total_s,
+        )
+
 
 def main() -> None:
     configure_logging()
