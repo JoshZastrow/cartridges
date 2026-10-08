@@ -80,6 +80,7 @@ PROFILING_DIR = "/cache/profiling"  # the only place on the shared volume we wri
 # Fixed test-split pages, picked by reference token length (DeepSeek tokenizer):
 # p10 / median / p90 of the 78 test pages = 87 / 249 / 611 tokens.
 PAGES = {"short": 25, "median": 19, "long": 48}
+STACK_PASS_MAX_NEW_TOKENS = 4
 
 STEPS = ("baseline", "ngram", "merge", "moe_sync", "cuda_graph", "batched_moe")
 
@@ -185,6 +186,9 @@ def _install_stage_hooks(inner) -> None:
     lm.register_forward_pre_hook(lambda module, args: RANGES.lm_call())
     labelled = [(f"vision_encode.{attr}", getattr(lm, attr)) for attr in ("sam_model", "qwen2_model", "projector")]
     labelled += [(f"lm.layer{i:02d}", layer) for i, layer in enumerate(lm.layers)]
+    # DeepseekV2MoE (routing + expert loop + shared experts), in every layer
+    # after first_k_dense_replace; one label so its total per step is direct.
+    labelled += [("lm.moe", layer.mlp) for layer in lm.layers if hasattr(layer.mlp, "experts")]
     for name, module in labelled:
         module.register_forward_pre_hook(lambda m, a, name=name: RANGES.push(name))
         module.register_forward_hook(lambda m, a, o, name=name: RANGES.pop(name))
@@ -602,7 +606,7 @@ def _flat_numbers(d: dict, prefix: str = "") -> dict[str, float]:
 
 @app.function(
     gpu="A100",
-    timeout=20 * MINUTES,
+    timeout=30 * MINUTES,
     # a with_stack Chrome trace of a 64-token eager decode is ~1 GB of JSON
     # before gzip; trace_stats() loads it whole
     memory=32 * 1024,
@@ -620,7 +624,14 @@ def profile_page(config: PageProfileConfig) -> dict:
     from datasets import load_from_disk
     from torch.profiler import ProfilerActivity, profile
 
-    from cartridges.training.perf_metrics import stage_coverage, step_durations, summarize, trace_stats
+    from cartridges.training.perf_metrics import (
+        collapse_folded,
+        op_tables,
+        stage_coverage,
+        step_durations,
+        summarize,
+        trace_stats,
+    )
     from cartridges.training.profile_page_report import render_report
 
     if config.mode not in ("generate", "forward"):
@@ -671,33 +682,51 @@ def profile_page(config: PageProfileConfig) -> dict:
         finally:
             sampler.stop()
         gen = dict(state.last)
+        # Export before any other profiler session starts: exporting after the
+        # stack pass below produced ts=0/dur=0 for every CUDA runtime, kernel
+        # and memcpy event of this pass.
+        with _stage("export_trace", out_dir=out_dir):
+            prof.export_chrome_trace(f"{out_dir}/trace.json")
+            with open(f"{out_dir}/trace.json") as f:
+                events = json.load(f)["traceEvents"]
+            stats = trace_stats(events)
+            # from the trace JSON, not prof.key_averages() (~8 min of Python here)
+            with open(f"{out_dir}/ops.txt", "w") as f:
+                f.write(op_tables(events, n=30))
+            del events
+            _gzip(f"{out_dir}/trace.json")
         stack_prof = None
         if config.with_stack:
             # Separate pass for the flame graphs only (stack capture also
             # inflates CPU timings, so it stays out of the timeline above).
-            with _stage("stack_pass"), profile(
+            # export_stacks is slow (Python over every stacked event: >10 min
+            # for 64 eager steps), so this pass decodes fewer tokens; the
+            # per-step pattern repeats, so flame-graph proportions hold.
+            with _stage("stack_pass", max_new_tokens=STACK_PASS_MAX_NEW_TOKENS), profile(
                 activities=activities, with_stack=True,
                 # without verbose=True, export_stacks writes empty files
                 experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True),
             ) as stack_prof:
-                stack_text, _, _ = timed_infer(tmpdir, config.max_new_tokens)
+                RANGES.enabled = False
+                try:
+                    stack_text, _, _ = timed_infer(tmpdir, min(config.max_new_tokens, STACK_PASS_MAX_NEW_TOKENS))
+                finally:
+                    RANGES.enabled = True
 
     with _stage("write_outputs", out_dir=out_dir):
         with open(f"{out_dir}/output.txt", "w") as f:
             f.write(text)
-        prof.export_chrome_trace(f"{out_dir}/trace.json")
-        with open(f"{out_dir}/trace.json") as f:
-            stats = trace_stats(json.load(f)["traceEvents"])
-        _gzip(f"{out_dir}/trace.json")
         if stack_prof is not None:
-            stack_prof.export_stacks(f"{out_dir}/stacks_cpu.folded", "self_cpu_time_total")
-            stack_prof.export_stacks(f"{out_dir}/stacks_gpu.folded", "self_cuda_time_total")
-        averages = prof.key_averages()
-        with open(f"{out_dir}/ops.txt", "w") as f:
-            f.write("Top 30 by self CPU time\n")
-            f.write(averages.table(sort_by="self_cpu_time_total", row_limit=30, max_name_column_width=70))
-            f.write("\n\nTop 30 by self CUDA time\n")
-            f.write(averages.table(sort_by="self_cuda_time_total", row_limit=30, max_name_column_width=70))
+            for name, metric in (("stacks_cpu", "self_cpu_time_total"), ("stacks_gpu", "self_cuda_time_total")):
+                raw = f"{out_dir}/{name}.raw"
+                stack_prof.export_stacks(raw, metric)
+                # export_stacks writes one line per event (~400 MB); collapse
+                # identical stacks into the standard folded format
+                with open(raw) as f:
+                    folded = collapse_folded(f)
+                with open(f"{out_dir}/{name}.folded", "w") as f:
+                    f.write("\n".join(folded) + "\n")
+                os.remove(raw)
         gpu_rows = [(t - t0, util, mem) for t, util, mem in sampler.samples if t0 - 0.5 <= t <= t1 + 0.5]
         with open(f"{out_dir}/gpu.csv", "w") as f:
             f.write("t_s,util_pct,mem_mib\n")
@@ -725,7 +754,8 @@ def profile_page(config: PageProfileConfig) -> dict:
             "decode_tok_s_profiled": decode_tok_s(gen),
             "decode_tok_s_unprofiled": decode_tok_s(unprofiled),
             "output_matches_unprofiled": text == unprofiled_text,
-            "stack_pass_output_matches": (stack_text == unprofiled_text) if stack_prof is not None else None,
+            # stack pass decodes fewer tokens: compare against the same prefix
+            "stack_pass_output_is_prefix": unprofiled_text.startswith(stack_text) if stack_prof is not None else None,
             "peak_mem_gb": torch.cuda.max_memory_allocated() / 1e9,
         }
         with open(f"{out_dir}/stages.json", "w") as f:

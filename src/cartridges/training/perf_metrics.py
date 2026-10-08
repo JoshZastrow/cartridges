@@ -6,6 +6,7 @@ logic can be unit tested locally on a Mac without the CUDA stack.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 
 
@@ -109,8 +110,11 @@ def trace_stats(events: list[dict], step_name: str = "decode_step", gap_us: floa
     if not steps:
         return {"n_steps": 0, "stage_ms": stage_ms}
 
-    def in_steps(e) -> bool:
-        return any(s <= e["ts"] < t for s, t in steps)
+    starts = [s for s, _ in steps]
+
+    def in_steps(e) -> bool:  # steps don't overlap: check the last one starting before e
+        i = bisect.bisect_right(starts, e["ts"]) - 1
+        return i >= 0 and e["ts"] < steps[i][1]
 
     launches = syncs = memcpy_calls = dtoh = 0
     sync_ops: dict[str, int] = {}
@@ -152,6 +156,79 @@ def trace_stats(events: list[dict], step_name: str = "decode_step", gap_us: floa
         "gpu_idle_frac_in_gaps": sum(g for g in gaps if g > gap_us) / span if span > 0 else None,
         "stage_ms": stage_ms,
     }
+
+
+def op_tables(events: list[dict], n: int = 30) -> str:
+    """Top-n CPU ops by self time and top-n GPU kernels by time, from Chrome
+    trace events (replaces prof.key_averages(), which builds a Python event
+    tree and took ~8 min on a 64-step eager decode trace).
+
+    CPU self time = duration minus time in directly nested cpu_op events on
+    the same thread."""
+    cpu: dict[str, list[float]] = {}  # name -> [self_us, total_us, count]
+    by_thread: dict = {}
+    for e in events:
+        if e.get("ph") == "X" and e.get("cat") == "cpu_op" and "dur" in e:
+            by_thread.setdefault((e.get("pid"), e.get("tid")), []).append(e)
+    for evs in by_thread.values():
+        evs.sort(key=lambda e: (e["ts"], -e["dur"]))
+        stack: list[list] = []  # [end, event, child_us]
+        def close(entry):
+            end, ev, child = entry
+            row = cpu.setdefault(ev["name"], [0.0, 0.0, 0])
+            row[0] += ev["dur"] - child
+            row[1] += ev["dur"]
+            row[2] += 1
+        for e in evs:
+            while stack and e["ts"] >= stack[-1][0]:
+                close(stack.pop())
+            if stack:
+                stack[-1][2] += e["dur"]
+            stack.append([e["ts"] + e["dur"], e, 0.0])
+        while stack:
+            close(stack.pop())
+    gpu: dict[str, list[float]] = {}
+    for e in events:
+        if e.get("ph") == "X" and e.get("cat") in GPU_CATS and "dur" in e:
+            row = gpu.setdefault(e["name"], [0.0, 0])
+            row[0] += e["dur"]
+            row[1] += 1
+
+    def table(title, rows, headers):
+        out = [title, "  ".join(headers)]
+        out += ["  ".join(r) for r in rows]
+        return "\n".join(out)
+
+    cpu_total = sum(r[0] for r in cpu.values()) or 1.0
+    cpu_rows = [
+        (f"{v[0] / 1e3:12.3f}", f"{100 * v[0] / cpu_total:6.1f}%", f"{v[1] / 1e3:12.3f}", f"{int(v[2]):9d}", k[:90])
+        for k, v in sorted(cpu.items(), key=lambda kv: -kv[1][0])[:n]
+    ]
+    gpu_total = sum(r[0] for r in gpu.values()) or 1.0
+    gpu_rows = [
+        (f"{v[0] / 1e3:12.3f}", f"{100 * v[0] / gpu_total:6.1f}%", f"{int(v[1]):9d}", k[:90])
+        for k, v in sorted(gpu.items(), key=lambda kv: -kv[1][0])[:n]
+    ]
+    return (
+        table(f"Top {n} CPU ops by self time", cpu_rows, ("self_ms".rjust(12), "share".rjust(7), "total_ms".rjust(12), "calls".rjust(9), "op"))
+        + "\n\n"
+        + table(f"Top {n} GPU kernels/copies by time", gpu_rows, ("gpu_ms".rjust(12), "share".rjust(7), "calls".rjust(9), "kernel"))
+        + "\n"
+    )
+
+
+def collapse_folded(lines) -> list[str]:
+    """Sum the counts of identical stacks in `export_stacks` output
+    ("frame;frame;frame <count>" per event, hundreds of MB uncollapsed) into
+    standard collapsed-stack lines, heaviest first."""
+    totals: dict[str, int] = {}
+    for line in lines:
+        line = line.rstrip("\n")
+        stack, _, count = line.rpartition(" ")
+        if not stack or not count.lstrip("-").isdigit():
+            continue
+        totals[stack] = totals.get(stack, 0) + int(count)
+    return [f"{stack} {count}" for stack, count in sorted(totals.items(), key=lambda kv: -kv[1])]
 
 
 def step_durations(call_times: list[float], t_end: float) -> list[float]:

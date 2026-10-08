@@ -5,7 +5,9 @@ import pytest
 from cartridges.training.perf_metrics import (
     GenerationTiming,
     NoRepeatNGramBlocker,
+    collapse_folded,
     hf_reference_banned,
+    op_tables,
     mean_in_window,
     parse_nvidia_smi_line,
     stage_coverage,
@@ -106,6 +108,27 @@ def test_trace_stats_counts_dtoh_copies_and_memcpy_calls():
     stats = trace_stats(events)
     assert stats["memcpy_calls_per_step"] == 1
     assert stats["dtoh_copies_per_step"] == 1
+
+
+def test_op_tables_self_time_excludes_nested_ops():
+    events = [
+        dict(_x("aten::linear", "cpu_op", 0, 100), pid=1, tid=1),
+        dict(_x("aten::mm", "cpu_op", 10, 60), pid=1, tid=1),  # nested in linear
+        dict(_x("aten::item", "cpu_op", 200, 30), pid=1, tid=1),
+        _x("gemv_kernel", "kernel", 15, 40),
+        _x("gemv_kernel", "kernel", 120, 20),
+    ]
+    out = op_tables(events, n=5)
+    lines = out.splitlines()
+    cpu = {line.split()[-1]: float(line.split()[0]) for line in lines[2:5]}
+    assert cpu == {"aten::mm": 0.06, "aten::linear": 0.04, "aten::item": 0.03}
+    gpu_line = next(line for line in lines if line.endswith("gemv_kernel"))
+    assert float(gpu_line.split()[0]) == pytest.approx(0.06) and gpu_line.split()[2] == "2"
+
+
+def test_collapse_folded_sums_identical_stacks():
+    lines = ["a;b 3\n", "a;b 4\n", "a;c 1\n", "garbage\n", "a;b x 2\n"]
+    assert collapse_folded(lines) == ["a;b 7", "a;b x 2", "a;c 1"]
 
 
 def test_step_durations_and_summary():

@@ -36,6 +36,9 @@ class _Ranges:
     def __init__(self):
         self._open: list = []
         self.lm_calls = 0
+        # off during a with_stack profile: record_function captures a Python
+        # stack on every enter there, and the labels alone took ~47% of CPU
+        self.enabled = True
         self.call_times: list[float] = []  # host time at each LM call (per-step wall time)
 
     def reset_calls(self):
@@ -45,6 +48,8 @@ class _Ranges:
     def push(self, name: str):
         import torch
 
+        if not self.enabled:
+            return
         rf = torch.profiler.record_function(name)
         rf.__enter__()
         torch.cuda.nvtx.range_push(name)
