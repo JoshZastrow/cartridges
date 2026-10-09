@@ -112,6 +112,316 @@ class Cli:
             response.model_source, response.hf_revision, response.total_s,
         )
 
+    # --- model registry (see docs/plans/batch-ocr-pipeline.md) ---------------
+
+    def model_promote(
+        self,
+        revision: str,
+        max_cer: float = 0.08,
+        max_loop_rate: float = 0.02,
+        split: str = "test",
+        dry_run: bool = False,
+    ) -> None:
+        """Evaluate an adapter revision. If it passes the thresholds, tag it
+        verified-<date>-<sha7> and move the tag prod to it.
+
+        Prints a JSON result. Exit code 2 if the revision does not pass.
+        dry_run=True evaluates and checks, but does not change the tags.
+        """
+        from cartridges.serve.registry import check_promotion, resolve_revision, tag_verified
+
+        sha = resolve_revision(revision)
+        predictions = _run_eval(sha, split)
+        result = check_promotion(predictions, max_cer=max_cer, max_loop_rate=max_loop_rate)
+        tags = tag_verified(sha) if result.passed and not dry_run else []
+        _print_json({"revision": revision, "sha": sha, "tags": tags, **result.model_dump()})
+        if not result.passed:
+            raise SystemExit(2)
+
+    def model_parity(
+        self,
+        revision: str,
+        split: str = "test",
+        dataset_dir: str = "data/train/hf_dataset",
+        out: str = "parity_report.json",
+        concurrency: int = 16,
+        hf_call_id: str = "",
+    ) -> None:
+        """Phase 0: compare the deployed vLLM server with the training eval
+        path (unsloth + PEFT + model.infer) on the same dataset images.
+
+        `revision` must be the deployed revision (serve_deploy first). The HF
+        eval and the vLLM requests run at the same time. Writes the full
+        report to `out` and prints the summary. Exit code 2 if parity fails.
+        Needs VLLM_API_KEY.
+
+        hf_call_id: the call id of an evaluate() call that is already running
+        or complete (printed in the log). The command then waits for that
+        call and does not start a new eval.
+        """
+        import asyncio
+        import io
+        import json
+        import os
+
+        from datasets import load_from_disk
+
+        from cartridges.batch.backends import VllmBackend
+        from cartridges.serve.parity import PARITY_DECODING, compare, vllm_predictions
+        from cartridges.serve.registry import deployed, resolve_revision
+
+        sha = resolve_revision(revision)
+        record = deployed()
+        if record is None or record["model_sha"] != sha:
+            raise SystemExit(f"deployed model is {record}; run `cartridges serve_deploy --revision {revision}`")
+
+        examples = list(load_from_disk(dataset_dir)[split])
+        references = [e["text"] for e in examples]
+        images = []
+        for e in examples:
+            buf = io.BytesIO()
+            e["image"].save(buf, format="PNG")  # same bytes as eval's .save(<path>.png)
+            images.append(buf.getvalue())
+        logger.info("parity: revision=%s sha=%s split=%s n=%d", revision, sha, split, len(images))
+
+        async def run():
+            backend = VllmBackend(
+                _serve_function().get_web_url(), api_key=os.environ["VLLM_API_KEY"],
+                decoding=PARITY_DECODING, max_connections=concurrency,
+            )
+            try:
+                hf_task = asyncio.create_task(asyncio.to_thread(_run_eval, sha, split, hf_call_id))
+                vllm = await vllm_predictions(images, backend, concurrency)
+                logger.info("parity: vLLM done (%d/%d ok); waiting for HF eval",
+                            sum(v is not None for v in vllm), len(vllm))
+                return await hf_task, vllm
+            finally:
+                await backend.aclose()
+
+        predictions, vllm = asyncio.run(run())
+        if [p["reference"] for p in predictions] != references:
+            raise SystemExit(
+                "HF eval references differ from the local dataset; rebuild the "
+                "training image or point --dataset_dir at the same data"
+            )
+        report = compare(
+            references, [p["hypothesis"] for p in predictions], vllm,
+            revision=revision, model_sha=sha,
+        )
+        Path(out).write_text(json.dumps(report.model_dump(), indent=2, ensure_ascii=False) + "\n")
+        _print_json({"report": out, **report.model_dump(exclude={"examples"})})
+        if not report.passed:
+            raise SystemExit(2)
+
+    def model_merge(self, revision: str = "prod", overwrite: bool = False) -> None:
+        """Merge the adapter at `revision` into the base weights, on the volume."""
+        from cartridges.serve.registry import resolve_revision
+
+        sha = resolve_revision(revision)
+        _print_json(_merge(sha, overwrite=overwrite))
+
+    # --- serving ---------------------------------------------------------------
+
+    def serve_deploy(
+        self, revision: str = "prod", max_containers: int = 8, max_num_seqs: int = 32
+    ) -> None:
+        """Deploy the vLLM server for `revision` ("base" for the base model).
+
+        Merges the adapter first if necessary. The deploy does not start a
+        GPU container; the first request (or serve_warm) does.
+        """
+        import os
+
+        from cartridges.serve.registry import BASE, record_deploy, resolve_revision
+
+        sha = resolve_revision(revision)
+        if sha != BASE:
+            _merge(sha)
+        os.environ["CARTRIDGES_OCR_MODEL_SHA"] = sha
+        os.environ["CARTRIDGES_OCR_MAX_CONTAINERS"] = str(max_containers)
+        os.environ["CARTRIDGES_OCR_MAX_NUM_SEQS"] = str(max_num_seqs)
+        import modal
+
+        from cartridges.serve.vllm_server import app  # reads the environment above
+
+        with modal.enable_output():
+            app.deploy()
+        _print_json({**record_deploy(revision, sha), "url": _serve_function().get_web_url()})
+
+    def serve_status(self) -> None:
+        """Print the deployed model, the URL, and the container counts. This
+        does not send a request to the server, so it does not start a container."""
+        from cartridges.serve.registry import deployed
+
+        fn = _serve_function()
+        stats = fn.get_current_stats()
+        _print_json(
+            {
+                "deployed": deployed(),
+                "url": fn.get_web_url(),
+                "backlog": stats.backlog,
+                "num_total_runners": stats.num_total_runners,
+            }
+        )
+
+    def serve_warm(self, containers: int = 1) -> None:
+        """Keep `containers` GPU containers warm until serve_cool. Billed while idle."""
+        _serve_function().update_autoscaler(min_containers=containers)
+        _print_json({"min_containers": containers})
+
+    def serve_cool(self) -> None:
+        """Let all idle containers scale down (min_containers=0)."""
+        _serve_function().update_autoscaler(min_containers=0)
+        _print_json({"min_containers": 0})
+
+    # --- batch notes pipeline --------------------------------------------------
+
+    def notes_process(
+        self,
+        *pdfs: str,
+        out: str = "notes_out",
+        concurrency: int = 64,
+        containers: int = 0,
+        dpi: int = 250,
+        max_tokens: int = 1024,
+        retry_flagged: bool = False,
+        dry_run: bool = False,
+    ) -> None:
+        """OCR all pages of the PDFs (or of all *.pdf in a directory) with the
+        deployed model. Write the outputs to `out`.
+
+        Pages already in the cache for this file and this model are not sent
+        again. containers=K pre-warms K GPU containers for the run and sets
+        the minimum back to 0 at the end. Needs DATABASE_URL, and
+        VLLM_API_KEY unless dry_run.
+
+        Prints a JSON report to stdout (logs go to stderr). Exit code 0: all
+        pages OK. 2: one or more pages failed or are looped. 1: fatal error.
+        """
+        import asyncio
+        import os
+
+        from cartridges.batch.backends import VllmBackend
+        from cartridges.batch.keys import DecodingSettings
+        from cartridges.batch.pipeline import process
+        from cartridges.serve.registry import deployed
+        from cartridges.storage.cache import PostgresPageStore
+
+        paths = _pdf_paths(pdfs)
+        record = deployed()
+        if record is None:
+            raise SystemExit("no deployed model; run `cartridges serve_deploy` first")
+        fn = _serve_function()
+
+        async def run():
+            store = await PostgresPageStore.connect()
+            backend = VllmBackend(
+                fn.get_web_url(),
+                api_key=os.environ.get("VLLM_API_KEY", "") if not dry_run else "",
+                decoding=DecodingSettings(max_tokens=max_tokens),
+                max_connections=concurrency,
+            )
+            try:
+                return await process(
+                    paths, backend=backend, store=store, model_sha=record["model_sha"],
+                    decoding=backend.decoding, dpi=dpi, concurrency=concurrency,
+                    retry_flagged=retry_flagged, dry_run=dry_run, out_dir=Path(out),
+                )
+            finally:
+                await backend.aclose()
+                await store.close()
+
+        warm = containers > 0 and not dry_run
+        if warm:
+            fn.update_autoscaler(min_containers=containers)
+        try:
+            report = asyncio.run(run())
+        finally:
+            if warm:
+                fn.update_autoscaler(min_containers=0)
+        _print_json({"ok": report.ok, "out": out, **report.model_dump()})
+        if not report.ok:
+            raise SystemExit(2)
+
+    def notes_collate(self, out: str = "notes_out", budget: int = 1_000_000) -> None:
+        """Join all transcripts in `out` into out/teacher_context.md. Exit code
+        2 if the token estimate is over `budget`."""
+        from cartridges.batch.outputs import collate
+
+        summary = collate(Path(out), budget_tokens=budget)
+        _print_json(summary)
+        if not summary["fits"]:
+            raise SystemExit(2)
+
+
+def _print_json(data: dict) -> None:
+    import json
+
+    print(json.dumps(data, indent=2, default=str))
+
+
+def _pdf_paths(items: tuple[str, ...]) -> list[Path]:
+    paths: list[Path] = []
+    for item in items:
+        path = Path(item)
+        paths.extend(sorted(path.glob("*.pdf")) if path.is_dir() else [path])
+    if not paths:
+        raise SystemExit("no PDF files given")
+    missing = [str(p) for p in paths if not p.is_file()]
+    if missing:
+        raise SystemExit(f"not found: {missing}")
+    return paths
+
+
+def _serve_function():
+    import modal
+
+    return modal.Function.from_name("cartridges-ocr-vllm", "serve")
+
+
+def _run_eval(sha: str, split: str, call_id: str = "") -> list[dict]:
+    """Run training's evaluate() on Modal for `sha` ("base" for the base
+    model), or wait for the existing call `call_id`. Return its predictions:
+    [{reference, hypothesis, cer, ...}]."""
+    import modal
+
+    if call_id:
+        logger.info("evaluate: waiting for existing call_id=%s", call_id)
+        return _wait_for_call(modal.FunctionCall.from_id(call_id))
+
+    from cartridges.serve.registry import BASE
+    from cartridges.training.config import EvalConfig, ModelSource
+    from cartridges.training.finetune import app, evaluate
+
+    if sha == BASE:
+        config = EvalConfig(model_source=ModelSource.BASE, split=split)
+    else:
+        config = EvalConfig(model_source=ModelSource.ARTIFACT, hf_revision=sha, split=split)
+    logger.info("evaluate: model_source=%s sha=%s split=%s", config.model_source.value, sha, split)
+    # detach=True: the eval continues if this process stops; pass its
+    # call_id back in to wait for it again.
+    with app.run(detach=True):
+        return _wait_for_call(evaluate.spawn(config))
+
+
+def _wait_for_call(call) -> list[dict]:
+    # Short get() calls, not one long .remote() stream (see the note above
+    # finetune.py's local entrypoints).
+    import modal
+
+    while True:
+        try:
+            return call.get(timeout=60)[0]["predictions"]
+        except (TimeoutError, modal.exception.TimeoutError):
+            logger.info("evaluate still running: call_id=%s", call.object_id)
+
+
+def _merge(sha: str, overwrite: bool = False) -> dict:
+    from cartridges.serve.merge import app, merge_adapter
+
+    with app.run():
+        return merge_adapter.remote(sha, overwrite=overwrite)
+
 
 def main() -> None:
     configure_logging()
