@@ -30,3 +30,6 @@ data/
 .neon
 .env.local
 node_modules/
+
+# profiler outputs (traces, memory snapshots) -- local only
+profiles/
