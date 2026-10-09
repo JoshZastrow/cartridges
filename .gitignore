@@ -31,5 +31,5 @@ data/
 .env.local
 node_modules/
 
-# profiler outputs (traces, memory snapshots) -- local only
+# torch.profiler traces / profiling results (large, not committed)
 profiles/
