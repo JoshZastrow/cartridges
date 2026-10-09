@@ -1,0 +1,18 @@
+# Looping investigation E2 (docs/plans/loop-elimination.md): identical to
+# lr_decay_100steps.yaml (the run-liw4qzol adapter), but trained with the
+# collator fix that appends EOS with no preceding space token.
+max_steps: 100
+learning_rate: 0.0002
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr: 0.0001
+lora_r: 16
+lora_alpha: 16
+
+save_steps: 25
+save_total_limit: 3
+
+group: eos-loop-debug
+run_name: e2-train-eos-fix
+notes: "E2: no space before EOS in training targets; otherwise identical to run-liw4qzol."
+tags: [looping, e2, eos-format]

@@ -216,7 +216,11 @@ class DeepSeekOCRDataCollator:
                 if not assistant_started:
                     prompt_token_count = len(tokenized_str)
                     assistant_started = True
-                content = f"{content.strip()} {self.tokenizer.eos_token}"
+                # No space before EOS: pre-training's template (conversation.py
+                # sep2) appends EOS directly. " <eos>" tokenizes to a lone "Ġ"
+                # then EOS, a stop sequence greedy decoding rarely picks, so the
+                # model loops instead of stopping (docs/plans/loop-elimination.md).
+                content = f"{content.strip()}{self.tokenizer.eos_token}"
 
             text_splits = content.split("<image>")
 

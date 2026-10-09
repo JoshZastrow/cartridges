@@ -1,0 +1,18 @@
+# Looping investigation E3 (docs/plans/loop-elimination.md): identical to
+# eos_fix_100steps.yaml (E2) but with max_steps doubled, to test whether the
+# EOS-fixed model is still undertrained.
+max_steps: 200
+learning_rate: 0.0002
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr: 0.0001
+lora_r: 16
+lora_alpha: 16
+
+save_steps: 50
+save_total_limit: 3
+
+group: eos-loop-debug
+run_name: e3-train-eos-fix-200steps
+notes: "E3: E2 EOS fix + 200 steps (tests undertraining)."
+tags: [looping, e3, eos-format, 200steps]
