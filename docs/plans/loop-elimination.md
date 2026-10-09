@@ -22,7 +22,9 @@ whose reference itself ends that way ("Repair, repair, repair.") are forgiven.
 
 - Code: `src/cartridges/training/loops.py`, tests: `tests/test_loops.py`
 - On the references alone it scores 0.000 (train and test), so it has no false positives on real handwriting.
-- Mean CER is logged next to it as a guardrail, not optimized.
+- **Corpus CER** (`training/metrics.py`: all character edits ÷ all reference characters; blank
+  references excluded and counted) is logged next to it as a guardrail, not optimized. The
+  mean of per-page CER was dropped: one blank page (test/57, empty reference) made it 1000%+.
 
 ## EOS audit (done before any experiment)
 
@@ -102,12 +104,18 @@ uv run modal run --detach -m cartridges.training.finetune::run_finetune \
 
 ## Results log
 
-| Run | Model | Change | loop_rate | n_looped / n | mean CER | W&B |
+| Run | Model | Change | loop_rate | n_looped / n | corpus CER | W&B |
 |---|---|---|---|---|---|---|
-| E0 `e0-eval-base` | base DeepSeek-OCR-2 | none (infer() defaults) | **0.240** (test 0.321) | 93 / 387 | 1208% (median 77%) | [xz1yd8c3](https://wandb.ai/conle-ai/cartridges/runs/xz1yd8c3) |
-| E0 `e0-eval-ft-liw4qzol` | adapter `run-liw4qzol` | none (infer() defaults) | **0.062** (test 0.077) | 24 / 387 | 256% (median 14.3%) | [yrbjfidv](https://wandb.ai/conle-ai/cartridges/runs/yrbjfidv) |
+| E0 `e0-eval-base` | base DeepSeek-OCR-2 | none (infer() defaults) | **0.240** (test 0.321) | 93 / 387 | 94.4% | [xz1yd8c3](https://wandb.ai/conle-ai/cartridges/runs/xz1yd8c3) |
+| E0 `e0-eval-ft-liw4qzol` | adapter `run-liw4qzol` | none (infer() defaults) | **0.062** (test 0.077) | 24 / 387 | 42.1% | [yrbjfidv](https://wandb.ai/conle-ai/cartridges/runs/yrbjfidv) |
 
 E0 notes: 9 pages loop under both models, 84 only under the base model, 15 only under the
 fine-tuned one. Eval set built from these: `data/train/loop_eval/manifest.jsonl`, 108 loop
 pages (79 train, 29 test) + 108 control pages (94 train, 14 test). The fine-tuned model
 decodes at ~9 tok/s median vs ~19 tok/s for the base model.
+
+Corpus CER notes (E0 fine-tuned, 42.1%): 12 pages have references longer than the 1,024-token
+output cap; they hold 20% of reference characters but 38% of all character errors (71% of them
+deletions, i.e. truncation). train/244 alone has a 46,397-character (10,880-token) reference,
+likely a labelling error (several pages in one label), and accounts for ~18% of all edits.
+Pages with references within the cap: corpus CER 32.7%.

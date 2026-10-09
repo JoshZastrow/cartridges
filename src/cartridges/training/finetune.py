@@ -546,12 +546,14 @@ def _run_inference(
                     }
                 )
 
-        scored = [p["cer"] for p in predictions if p["cer"] is not None]
-        n_errors = n - len(scored)
-        mean_cer = sum(scored) / len(scored) if scored else None
+        from cartridges.training.metrics import corpus_cer
+
+        n_errors = sum(p["hypothesis"] is None for p in predictions)
+        cer = corpus_cer([p["reference"] for p in predictions], [p["hypothesis"] for p in predictions])
         logger.info(
-            "inference summary: n_examples=%d n_errors=%d mean_cer=%s",
-            n, n_errors, f"{mean_cer:.2%}" if mean_cer is not None else "n/a",
+            "inference summary: n_examples=%d n_errors=%d corpus_cer=%s n_blank_refs=%d",
+            n, n_errors, f"{cer['corpus_cer']:.2%}" if cer["corpus_cer"] is not None else "n/a",
+            cer["n_blank_refs"],
         )
     return predictions
 
@@ -744,6 +746,11 @@ def evaluate(config: EvalConfig = EvalConfig()) -> list[dict]:
                 api_run.summary["eval_cer"] = mean_cer
                 api_run.summary[f"eval_cer_{config.split}"] = mean_cer
                 api_run.summary["eval_n"] = len(scored)
+                from cartridges.training.metrics import corpus_cer
+
+                api_run.summary["eval_corpus_cer"] = corpus_cer(
+                    [p["reference"] for p in predictions], [p["hypothesis"] for p in predictions]
+                )["corpus_cer"]
                 api_run.summary.update()
 
     return [
@@ -842,6 +849,7 @@ def loop_eval(
     import json
 
     from cartridges.training.loops import ends_in_loop, loop_rate
+    from cartridges.training.metrics import corpus_cer
 
     # Init before inference so the run shows as "running" in the group while
     # the shards work, instead of appearing only once everything is done.
@@ -866,13 +874,14 @@ def loop_eval(
 
     scored = [p for p in predictions if p["hypothesis"] is not None]
     rate = loop_rate([p["hypothesis"] for p in predictions], [p["reference"] for p in predictions])
-    cers = [p["cer"] for p in scored]
+    cer = corpus_cer([p["reference"] for p in predictions], [p["hypothesis"] for p in predictions])
     summary = {
         "loop_rate": rate,
         "n_looped": sum(p["looped"] for p in scored),
         "n_pages": len(scored),
         "n_errors": len(predictions) - len(scored),
-        "mean_cer": sum(cers) / len(cers) if cers else None,
+        "corpus_cer": cer["corpus_cer"],
+        "n_blank_refs": cer["n_blank_refs"],
         "shard_gpus": sorted({p["gpu"] for p in predictions}),
     }
 
