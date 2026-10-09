@@ -18,7 +18,7 @@ import time
 
 import modal
 
-from cartridges.training.config import DownloadConfig, EvalConfig, ModelSource, TrainConfig
+from cartridges.training.config import DecodingConfig, DownloadConfig, EvalConfig, ModelSource, TrainConfig
 
 MINUTES = 60
 
@@ -221,14 +221,46 @@ def _load_base_and_lora(config: TrainConfig):
     return model, tokenizer
 
 
+def _init_train_run(config: TrainConfig) -> None:
+    """Start the W&B run for a training job (full TrainConfig as config=,
+    plus group/notes/tags). Callers start it as early as possible so the
+    run's runtime and system (GPU) metrics cover model/data loading too."""
+    import wandb
+
+    with _stage("init_tracking", group=config.group):
+        os.environ.setdefault("WANDB_ENTITY", WANDB_ENTITY)
+        os.environ.setdefault("WANDB_PROJECT", WANDB_PROJECT)
+        # Model checkpoints/adapters go to the HF Hub repo (push_to_hub in
+        # TrainingArguments), not W&B artifacts -- W&B here is metrics/
+        # config/CER only. (WANDB_LOG_MODEL was tried first; even just LoRA
+        # adapters at every save_steps blew through a 5GB account quota in
+        # one run.)
+        wandb.init(
+            entity=WANDB_ENTITY,
+            project=WANDB_PROJECT,
+            group=config.group,
+            job_type="finetune",
+            name=config.run_name or None,
+            notes=config.notes or None,
+            tags=config.tags or None,
+            config=config.dict(),
+        )
+
+
 def _train(
-    model, tokenizer, config: TrainConfig, examples: list[dict], push_to_hub: bool = True
+    model,
+    tokenizer,
+    config: TrainConfig,
+    examples: list[dict],
+    push_to_hub: bool = True,
+    init_run: bool = True,
 ) -> dict:
     """Fine-tune `model` on `examples` ({"image", "text"} rows). Returns token stats.
 
     `push_to_hub=False` skips all Hub checkpoint/final pushes and tagging --
     used by `_evaluate_kfold()`, where each fold's LoRA is thrown away after
     scoring and would otherwise spam the repo with fold-scoped commits/tags.
+    `init_run=False` means the caller already started the W&B run.
     """
     from unsloth import FastVisionModel, is_bf16_supported
     from transformers import Trainer, TrainingArguments
@@ -251,23 +283,8 @@ def _train(
     # too, but its project bootstrap check fails even for this account's
     # Admin role on the team -- plain wandb.init() works fine, so dropped
     # weave since it wasn't something actually needed.)
-    with _stage("init_tracking", group=config.group):
-        os.environ.setdefault("WANDB_ENTITY", WANDB_ENTITY)
-        os.environ.setdefault("WANDB_PROJECT", WANDB_PROJECT)
-        # Model checkpoints/adapters go to the HF Hub repo below (push_to_hub
-        # in TrainingArguments), not W&B artifacts -- W&B here is metrics/
-        # config/CER only. (WANDB_LOG_MODEL was tried first; even just LoRA
-        # adapters at every save_steps blew through a 5GB account quota in
-        # one run.)
-        wandb.init(
-            entity=WANDB_ENTITY,
-            project=WANDB_PROJECT,
-            group=config.group,
-            job_type="finetune",
-            notes=config.notes or None,
-            tags=config.tags or None,
-            config=config.dict(),
-        )
+    if init_run:
+        _init_train_run(config)
 
     if push_to_hub:
         with _stage("create_hf_repo", hf_repo_id=config.hf_repo_id):
@@ -385,16 +402,19 @@ def _truncate(text: str | None, n: int = 100) -> str:
 
 
 @contextlib.contextmanager
-def _capped_generate(model, max_new_tokens: int):
+def _capped_generate(model, max_new_tokens: int, decoding: DecodingConfig | None = None):
     """model.infer() hardcodes max_new_tokens=8192 internally with no other
     reliable early-stop guarantee -- an undertrained/repetitive model can
     burn the full budget per example (minutes). infer() doesn't expose this
     as a parameter, so monkeypatch model.generate() (scoped to this `model`
-    instance, restored on exit) to clamp whatever it's called with."""
+    instance, restored on exit) to clamp whatever it's called with. The same
+    hook applies any `decoding` overrides over infer()'s hardcoded kwargs."""
     original_generate = model.generate
+    overrides = decoding.model_dump(exclude_none=True) if decoding else {}
 
     def capped(*args, **kwargs):
         kwargs["max_new_tokens"] = min(kwargs.get("max_new_tokens", max_new_tokens), max_new_tokens)
+        kwargs.update(overrides)
         return original_generate(*args, **kwargs)
 
     model.generate = capped
@@ -404,7 +424,9 @@ def _capped_generate(model, max_new_tokens: int):
         model.generate = original_generate
 
 
-def _run_inference(model, tokenizer, examples: list[dict], config: TrainConfig) -> list[dict]:
+def _run_inference(
+    model, tokenizer, examples: list[dict], config: TrainConfig, decoding: DecodingConfig | None = None
+) -> list[dict]:
     """Run `model.infer` over `examples`; logs per-example progress/score/errors
     as it goes (so a crash mid-run still leaves useful Modal logs), and returns
     [{"index", "reference", "hypothesis", "cer", "status", "elapsed_s"}, ...].
@@ -422,12 +444,12 @@ def _run_inference(model, tokenizer, examples: list[dict], config: TrainConfig) 
     with _stage(
         "run_inference", n_examples=n, image_size=config.image_size,
         base_size=config.base_size, crop_mode=config.crop_mode,
-        max_new_tokens=config.max_new_tokens,
+        max_new_tokens=config.max_new_tokens, decoding=decoding,
     ):
         FastVisionModel.for_inference(model)
 
         predictions = []
-        with tempfile.TemporaryDirectory() as tmpdir, _capped_generate(model, config.max_new_tokens):
+        with tempfile.TemporaryDirectory() as tmpdir, _capped_generate(model, config.max_new_tokens, decoding):
             for i, example in enumerate(examples):
                 start = time.monotonic()
                 reference = example["text"]
@@ -533,11 +555,13 @@ def finetune(config: TrainConfig = TrainConfig()) -> dict:
 
     import wandb
 
+    _init_train_run(config)
+
     with _stage("load_dataset", dataset_dir=config.dataset_dir):
         dataset = list(load_from_disk(str(config.dataset_dir))["train"])
 
     model, tokenizer = _load_base_and_lora(config)
-    run_info = _train(model, tokenizer, config, dataset)
+    run_info = _train(model, tokenizer, config, dataset, init_run=False)
 
     with _stage("save_model", output_dir=config.output_dir):
         model.save_pretrained(str(config.output_dir))
@@ -694,6 +718,138 @@ def evaluate(config: EvalConfig = EvalConfig()) -> list[dict]:
     ]
 
 
+# --- looping investigation (docs/plans/loop-elimination.md) ---------------
+
+LOOP_GROUP = "eos-loop-debug"
+
+
+@app.function(
+    gpu="A100", timeout=4 * 60 * MINUTES, volumes={"/cache": model_cache}, secrets=[hf_secret, wandb_secret]
+)
+def loop_eval_shard(
+    config: EvalConfig,
+    decoding: DecodingConfig,
+    items: list[tuple[str, int]],
+    wandb_run_id: str | None = None,
+    shard: int = 0,
+) -> list[dict]:
+    """Transcribe one shard of (split, index) pages with the model `config` names.
+
+    With `wandb_run_id`, joins the coordinator's run as a W&B shared-mode
+    worker (https://docs.wandb.ai/models/track/log/distributed-training) so
+    this container's GPU system metrics are recorded under label shard-N."""
+    from datasets import load_from_disk
+
+    if wandb_run_id:
+        import wandb
+
+        wandb.init(
+            entity=WANDB_ENTITY,
+            project=WANDB_PROJECT,
+            id=wandb_run_id,
+            settings=wandb.Settings(
+                mode="shared",
+                x_primary=False,
+                x_label=f"shard-{shard}",
+                x_update_finish_state=False,
+                # default is ~15s, too coarse to see GPU utilization per page
+                x_stats_sampling_interval=5.0,
+            ),
+        )
+
+    dataset = load_from_disk(str(config.train_config.dataset_dir))
+    examples = [dataset[split][index] for split, index in items]
+    if config.model_source == ModelSource.BASE:
+        model, tokenizer = _load_base_model(config.train_config)
+    else:
+        model, tokenizer = _load_artifact_model(config)
+
+    predictions = _run_inference(model, tokenizer, examples, config.train_config, decoding)
+    import torch
+
+    # Only the primary (CPU coordinator) uploads hardware metadata in W&B
+    # shared mode, so report the GPU back for the run summary.
+    gpu_name = torch.cuda.get_device_name()
+    for prediction, (split, index), example in zip(predictions, items, examples):
+        prediction.update(
+            split=split, index=index, journal=example["journal"], page=example["page"], gpu=gpu_name
+        )
+    if wandb_run_id:
+        wandb.finish()
+    return predictions
+
+
+@app.function(timeout=6 * 60 * MINUTES, secrets=[wandb_secret])
+def loop_eval(
+    config: EvalConfig,
+    items: list[tuple[str, int]],
+    decoding: DecodingConfig = DecodingConfig(),
+    run_name: str = "",
+    notes: str = "",
+    tags: list[str] = [],
+    shards: int = 4,
+) -> dict:
+    """Score `loop_rate` (see training/loops.py) over `items`, fanned out
+    across `shards` GPU containers, and log one W&B run to LOOP_GROUP. The
+    W&B table holds page ids and scores only, never transcription text."""
+    import wandb
+
+    import json
+
+    from cartridges.training.loops import ends_in_loop, loop_rate
+
+    # Init before inference so the run shows as "running" in the group while
+    # the shards work, instead of appearing only once everything is done.
+    run = wandb.init(
+        entity=WANDB_ENTITY,
+        project=WANDB_PROJECT,
+        group=LOOP_GROUP,
+        job_type="loop-eval",
+        name=run_name or None,
+        notes=notes or None,
+        tags=["looping", *tags],
+        config={"eval": config.model_dump(mode="json"), "decoding": decoding.model_dump(), "shards": shards},
+        settings=wandb.Settings(mode="shared", x_primary=True, x_label="coordinator"),
+    )
+    logger.info("loop_eval wandb run: %s", run.url)
+
+    chunks = [items[i::shards] for i in range(shards) if items[i::shards]]
+    shard_args = [(config, decoding, chunk, run.id, i) for i, chunk in enumerate(chunks)]
+    predictions = [p for chunk in loop_eval_shard.starmap(shard_args) for p in chunk]
+    for p in predictions:
+        p["looped"] = ends_in_loop(p["hypothesis"]) and not ends_in_loop(p["reference"])
+
+    scored = [p for p in predictions if p["hypothesis"] is not None]
+    rate = loop_rate([p["hypothesis"] for p in predictions], [p["reference"] for p in predictions])
+    cers = [p["cer"] for p in scored]
+    summary = {
+        "loop_rate": rate,
+        "n_looped": sum(p["looped"] for p in scored),
+        "n_pages": len(scored),
+        "n_errors": len(predictions) - len(scored),
+        "mean_cer": sum(cers) / len(cers) if cers else None,
+        "shard_gpus": sorted({p["gpu"] for p in predictions}),
+    }
+
+    with _stage("log_loop_eval", run_name=run_name, **summary):
+        manifest = wandb.Artifact("loop-eval-items", type="dataset", description="(split, index) page ids")
+        with manifest.new_file("items.json") as f:
+            json.dump(items, f)
+        run.use_artifact(manifest)
+        table = wandb.Table(columns=["split", "index", "journal", "page", "looped", "cer", "hyp_words", "ref_words"])
+        for p in sorted(predictions, key=lambda p: (p["split"], p["index"])):
+            table.add_data(
+                p["split"], p["index"], p["journal"], p["page"], p["looped"], p["cer"],
+                len((p["hypothesis"] or "").split()), len(p["reference"].split()),
+            )
+        run.log({"pages": table, **{k: v for k, v in summary.items() if isinstance(v, (int, float))}})
+        run.summary.update(summary)
+        url = run.url
+        run.finish()
+
+    return {**summary, "run_name": run_name, "wandb_url": url, "predictions": predictions}
+
+
 # --- local entrypoints -----------------------------------------------------
 #
 # Long-running `.remote()` calls held open a single blocking connection for
@@ -726,6 +882,49 @@ def run_evaluate(
 
 
 @app.local_entrypoint()
+def run_loop_eval(
+    run_name: str,
+    items: str = "all",
+    model_source: str = "base",
+    hf_revision: str = "",
+    no_repeat_ngram_size: int | None = None,
+    repetition_penalty: float | None = None,
+    eos_token_id: int | None = None,
+    notes: str = "",
+    tags: str = "",
+    shards: int = 4,
+):
+    """Spawn a `loop_eval`. `items` is "all", a split name, or a JSONL
+    manifest of {"split", "index"} rows (data/train/loop_eval/manifest.jsonl).
+
+    uv run modal run --detach -m cartridges.training.finetune::run_loop_eval \\
+        --run-name baseline-base --model-source base
+    """
+    import json
+
+    from datasets import load_from_disk
+
+    if items.endswith(".jsonl"):
+        with open(items) as f:
+            pairs = [(row["split"], row["index"]) for row in map(json.loads, f)]
+    else:
+        dataset = load_from_disk("data/train/hf_dataset")
+        splits = list(dataset) if items == "all" else [items]
+        pairs = [(split, i) for split in splits for i in range(len(dataset[split]))]
+
+    config = EvalConfig(model_source=ModelSource(model_source), hf_revision=hf_revision or None)
+    decoding = DecodingConfig(
+        no_repeat_ngram_size=no_repeat_ngram_size,
+        repetition_penalty=repetition_penalty,
+        eos_token_id=eos_token_id,
+    )
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    print(f"loop_eval: run_name={run_name} n_items={len(pairs)} decoding={decoding.model_dump(exclude_none=True)}")
+    call = loop_eval.spawn(config, pairs, decoding, run_name, notes, tag_list, shards)
+    print(f"CALL_ID {call.object_id}")
+
+
+@app.local_entrypoint()
 def run_finetune(
     config_file: str = "",
     max_steps: int | None = None,
@@ -736,6 +935,7 @@ def run_finetune(
     gradient_accumulation_steps: int | None = None,
     warmup_steps: int | None = None,
     group: str | None = None,
+    run_name: str | None = None,
     notes: str | None = None,
     tags: str = "",
 ):
@@ -772,6 +972,7 @@ def run_finetune(
         "gradient_accumulation_steps": gradient_accumulation_steps,
         "warmup_steps": warmup_steps,
         "group": group,
+        "run_name": run_name,
         "notes": notes,
     }
     overrides.update({k: v for k, v in cli_values.items() if v is not None})
@@ -887,3 +1088,59 @@ def check_unsloth_tokenizer_ids() -> dict:
 def check_unsloth_tokenizer():
     call = check_unsloth_tokenizer_ids.spawn()
     print(f"CALL_ID {call.object_id}")
+
+
+@app.function(gpu="L4", volumes={"/cache": model_cache}, timeout=15 * MINUTES)
+def eos_audit(config: TrainConfig = TrainConfig()) -> dict:
+    """Diagnostic for the looping investigation: does EOS survive into the
+    training labels, and does inference stop on the same EOS id the model was
+    pre-trained with? Collates a padded batch of two training examples with
+    the Unsloth-loaded tokenizer (the one training actually uses)."""
+    from datasets import load_from_disk
+
+    from cartridges.training.collator import DeepSeekOCRDataCollator, to_conversation
+
+    model, tokenizer = _load_base_model(config)
+    collator = DeepSeekOCRDataCollator(
+        tokenizer=tokenizer,
+        model=model,
+        image_size=config.image_size,
+        base_size=config.base_size,
+        crop_mode=config.crop_mode,
+        train_on_responses_only=config.train_on_responses_only,
+    )
+    dataset = load_from_disk(str(config.dataset_dir))["train"]
+    batch = collator([to_conversation(dataset[i]) for i in (0, 1)])
+
+    samples = []
+    for row in range(2):
+        input_ids = batch["input_ids"][row].tolist()
+        labels = batch["labels"][row].tolist()
+        n_real = int(batch["attention_mask"][row].sum())
+        eos_positions = [i for i, t in enumerate(input_ids) if t == tokenizer.eos_token_id]
+        supervised = [i for i, label in enumerate(labels) if label != -100]
+        samples.append(
+            {
+                "n_tokens": len(input_ids),
+                "n_attended": n_real,
+                "eos_positions_in_input": eos_positions[:5],
+                "eos_supervised": any(labels[i] == tokenizer.eos_token_id for i in eos_positions),
+                "last_supervised_token": tokenizer.decode([input_ids[supervised[-1]]]) if supervised else None,
+                "tail_tokens": tokenizer.convert_ids_to_tokens(input_ids[-4:]),
+            }
+        )
+
+    return {
+        "tokenizer_eos": (tokenizer.eos_token, tokenizer.eos_token_id),
+        "tokenizer_pad": (tokenizer.pad_token, tokenizer.pad_token_id),
+        "pad_equals_eos": tokenizer.pad_token_id == tokenizer.eos_token_id,
+        "model_config_eos_token_id": model.config.eos_token_id,
+        "generation_config_eos_token_id": getattr(model.generation_config, "eos_token_id", None),
+        "encode_eos_text": tokenizer.encode(f" {tokenizer.eos_token}", add_special_tokens=False),
+        "samples": samples,
+    }
+
+
+@app.local_entrypoint()
+def run_eos_audit():
+    print(eos_audit.remote())

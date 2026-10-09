@@ -92,8 +92,21 @@ class TrainConfig(BaseModel):
     # set via CLI flags or a --config-file YAML (see finetune.py's
     # run_finetune entrypoint) rather than editing this file per run.
     group: str = "default"
+    # Short W&B run name naming the experiment, e.g. "e2-train-eos-fix".
+    # Empty lets W&B pick a random one.
+    run_name: str = ""
     notes: str = ""
     tags: list[str] = []
+
+
+class DecodingConfig(BaseModel):
+    """Overrides for the generate() kwargs DeepSeek-OCR-2's model.infer()
+    hardcodes (eval_mode: greedy, no_repeat_ngram_size=35, eos_token_id=
+    tokenizer.eos_token_id). None keeps infer()'s own value."""
+
+    no_repeat_ngram_size: int | None = None
+    repetition_penalty: float | None = None
+    eos_token_id: int | None = None
 
 
 class ModelSource(str, Enum):
