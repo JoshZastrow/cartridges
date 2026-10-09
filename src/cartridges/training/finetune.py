@@ -401,35 +401,68 @@ def _truncate(text: str | None, n: int = 100) -> str:
     return text if len(text) <= n else text[:n] + "..."
 
 
+class _NoTiming:
+    """Stand-in for the profiler's timer/state that CudaGraphDecoder.generate()
+    reports per-step timings to; evaluation doesn't need them."""
+
+    def __init__(self):
+        self.processor_s: list[float] = []
+        self.processor_times: dict[str, list[float]] = {}
+
+    def mark(self):
+        pass
+
+
 @contextlib.contextmanager
-def _capped_generate(model, max_new_tokens: int, decoding: DecodingConfig | None = None):
+def _capped_generate(model, max_new_tokens: int, decoding: DecodingConfig | None = None, decoder=None):
     """model.infer() hardcodes max_new_tokens=8192 internally with no other
     reliable early-stop guarantee -- an undertrained/repetitive model can
     burn the full budget per example (minutes). infer() doesn't expose this
-    as a parameter, so monkeypatch model.generate() (scoped to this `model`
-    instance, restored on exit) to clamp whatever it's called with. The same
-    hook applies any `decoding` overrides over infer()'s hardcoded kwargs."""
-    original_generate = model.generate
+    as a parameter, so monkeypatch generate() (restored on exit) to clamp
+    whatever it's called with. The same hook applies any `decoding`
+    overrides over infer()'s hardcoded kwargs, and, with `decoder` (a
+    fast_decode.CudaGraphDecoder), replaces HF generate entirely.
+
+    Patches the model `infer()` actually runs on: on a PeftModel that's the
+    inner model (get_base_model()), not the wrapper -- patching the wrapper
+    silently left adapter evals uncapped."""
+    target = model.get_base_model() if hasattr(model, "get_base_model") else model
+    original_generate = target.generate
     overrides = decoding.model_dump(exclude_none=True) if decoding else {}
+    if decoder is not None and "repetition_penalty" in overrides:
+        raise ValueError("fast_decode supports eos_token_id/no_repeat_ngram_size overrides, not repetition_penalty")
 
     def capped(*args, **kwargs):
         kwargs["max_new_tokens"] = min(kwargs.get("max_new_tokens", max_new_tokens), max_new_tokens)
         kwargs.update(overrides)
+        if decoder is not None:
+            return decoder.generate(*args, timer=_NoTiming(), state=_NoTiming(), **kwargs)
         return original_generate(*args, **kwargs)
 
-    model.generate = capped
+    target.generate = capped
     try:
         yield
     finally:
-        model.generate = original_generate
+        target.generate = original_generate
 
 
 def _run_inference(
-    model, tokenizer, examples: list[dict], config: TrainConfig, decoding: DecodingConfig | None = None
+    model,
+    tokenizer,
+    examples: list[dict],
+    config: TrainConfig,
+    decoding: DecodingConfig | None = None,
+    fast_decode: bool = False,
 ) -> list[dict]:
     """Run `model.infer` over `examples`; logs per-example progress/score/errors
     as it goes (so a crash mid-run still leaves useful Modal logs), and returns
     [{"index", "reference", "hypothesis", "cer", "status", "elapsed_s"}, ...].
+
+    `fast_decode` swaps HF generate for fast_decode.CudaGraphDecoder (one host
+    sync per MoE layer instead of one per expert, CUDA-graph decode step,
+    batched routed experts; LoRA stays unmerged). Same greedy/EOS/no-repeat-
+    ngram semantics, ~12x faster per page, but not bit-identical to HF
+    generate (docs/plans/inference-speed.md).
     """
     import tempfile
     import time
@@ -448,8 +481,20 @@ def _run_inference(
     ):
         FastVisionModel.for_inference(model)
 
+        decoder = None
+        if fast_decode:
+            from cartridges.training.fast_decode import CudaGraphDecoder, _moe_modules, _patch_moe
+
+            with _stage("setup_fast_decode"):
+                _patch_moe(model)
+                decoder = CudaGraphDecoder(model.get_base_model() if hasattr(model, "get_base_model") else model)
+                for moe in _moe_modules(model):
+                    moe._batched = True
+
         predictions = []
-        with tempfile.TemporaryDirectory() as tmpdir, _capped_generate(model, config.max_new_tokens, decoding):
+        with tempfile.TemporaryDirectory() as tmpdir, _capped_generate(
+            model, config.max_new_tokens, decoding, decoder
+        ):
             for i, example in enumerate(examples):
                 start = time.monotonic()
                 reference = example["text"]
@@ -681,7 +726,7 @@ def evaluate(config: EvalConfig = EvalConfig()) -> list[dict]:
         if config.hf_revision.startswith("run-"):
             wandb_run_id = config.hf_revision.removeprefix("run-")
 
-    predictions = _run_inference(model, tokenizer, dataset, config.train_config)
+    predictions = _run_inference(model, tokenizer, dataset, config.train_config, fast_decode=config.fast_decode)
 
     if wandb_run_id:
         # Write eval_cer onto the training run's own summary, alongside its
@@ -764,7 +809,7 @@ def loop_eval_shard(
     else:
         model, tokenizer = _load_artifact_model(config)
 
-    predictions = _run_inference(model, tokenizer, examples, config.train_config, decoding)
+    predictions = _run_inference(model, tokenizer, examples, config.train_config, decoding, config.fast_decode)
     import torch
 
     # Only the primary (CPU coordinator) uploads hardware metadata in W&B
@@ -893,6 +938,7 @@ def run_loop_eval(
     notes: str = "",
     tags: str = "",
     shards: int = 4,
+    fast_decode: bool = True,
 ):
     """Spawn a `loop_eval`. `items` is "all", a split name, or a JSONL
     manifest of {"split", "index"} rows (data/train/loop_eval/manifest.jsonl).
@@ -912,7 +958,9 @@ def run_loop_eval(
         splits = list(dataset) if items == "all" else [items]
         pairs = [(split, i) for split in splits for i in range(len(dataset[split]))]
 
-    config = EvalConfig(model_source=ModelSource(model_source), hf_revision=hf_revision or None)
+    config = EvalConfig(
+        model_source=ModelSource(model_source), hf_revision=hf_revision or None, fast_decode=fast_decode
+    )
     decoding = DecodingConfig(
         no_repeat_ngram_size=no_repeat_ngram_size,
         repetition_penalty=repetition_penalty,

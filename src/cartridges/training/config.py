@@ -129,6 +129,11 @@ class EvalConfig(BaseModel):
     # BASE / ARTIFACT: which dataset split to score against.
     split: str = "test"
 
+    # BASE / ARTIFACT: decode with fast_decode.CudaGraphDecoder instead of HF
+    # generate (~12x faster per page; same quality, not bit-identical -- see
+    # docs/plans/inference-speed.md). KFOLD_RETRAIN always uses HF generate.
+    fast_decode: bool = True
+
     # KFOLD_RETRAIN only: folds over the "train" split.
     k: int = 5
     seed: int = 3407
