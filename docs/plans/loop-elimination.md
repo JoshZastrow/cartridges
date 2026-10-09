@@ -1,0 +1,113 @@
+# Plan: eliminate end-of-page looping in the fine-tuned OCR model
+
+**Status:** in progress (started 2026-10-08)
+**W&B:** project `conle-ai/cartridges`, group **`eos-loop-debug`**, tag `looping`
+
+## Problem
+
+The LoRA-fine-tuned DeepSeek-OCR-2 adapter (`joshzastrow/deepseek-ocr2-lora@run-liw4qzol`,
+trained with `configs/finetune/lr_decay_100steps.yaml`) repeats its last few words on
+roughly 10% of eval pages instead of stopping. Median test CER is 19%, but mean test CER
+is 698%: a few runaway pages dominate it, which is why CER alone hid the problem.
+
+## Metric (single value)
+
+**`loop_rate`**: share of pages whose transcription *ends* in a loop that the
+hand-written reference doesn't. Lower is better; the target is **0**.
+
+A transcription ends in a loop when its final words are a phrase of 1–12 words repeated
+back-to-back ≥3 times (lowercased, punctuation stripped; a trailing partial copy cut off
+by the token cap still counts). Repetition in the middle of a page doesn't count. Pages
+whose reference itself ends that way ("Repair, repair, repair.") are forgiven.
+
+- Code: `src/cartridges/training/loops.py`, tests: `tests/test_loops.py`
+- On the references alone it scores 0.000 (train and test), so it has no false positives on real handwriting.
+- Mean CER is logged next to it as a guardrail, not optimized.
+
+## EOS audit (done before any experiment)
+
+`finetune.py::eos_audit` loads the tokenizer through Unsloth (as training does) and collates a
+padded batch:
+
+| Check | Result |
+|---|---|
+| EOS id: tokenizer / model config / generation config | 1 / 1 / 1 (`<｜end▁of▁sentence｜>`), all match pre-training |
+| pad == EOS? | No (pad id 2), so value-based label masking does **not** erase EOS |
+| EOS supervised in labels | Yes |
+| Tail of a training target | `'Ġramp', '.', 'Ġ', '<｜end▁of▁sentence｜>'` |
+
+**Finding:** `collator.py` builds the target as `f"{text} {eos}"`, which puts a standalone
+space token (`Ġ`, id 223) before EOS. Pre-training (`conversation.py`, `sep2`) appends EOS
+directly after the text. The fine-tuned model therefore learns "lone space, then EOS" as
+its stop sequence. Under greedy decoding a lone space loses to a space-prefixed word token
+(`Ġword`), so the model keeps writing instead of stopping.
+
+## Eval set
+
+1. Run the base model and `run-liw4qzol` over all 387 labeled pages (309 train + 78 test),
+   with infer()'s default decoding (`baseline-base`, `baseline-ft-liw4qzol`).
+2. **Loop set:** every page where either model loops. **Control set:** the same number of
+   pages where neither does (seeded random), so a fix that just truncates output can't
+   look good.
+3. Stored locally at `data/train/loop_eval/manifest.jsonl` (`{"split", "index", "set"}`).
+   Images stay in `data/train/hf_dataset`. W&B gets the page ids as a `loop-eval-items`
+   dataset artifact. No journal images or text go to W&B.
+
+## Experiments (one run each, in order, check-in after each)
+
+| # | Hypothesis | Change | Model |
+|---|---|---|---|
+| E1 | Decoding alone fixes it | `no_repeat_ngram_size` 35 → 10 | existing adapter |
+| E2 | The space-before-EOS target breaks stopping | Collator appends EOS with no space; retrain with the identical config | new adapter |
+| E3 | The fixed model is still undertrained | E2 fix + `max_steps` 200 | new adapter |
+| E4 | Confirm the winner | Best of E1–E3 on loop set + control set and full test split | best |
+
+(The original E2, "override inference EOS id", was dropped: the audit showed the ids
+already match everywhere.)
+
+## W&B naming
+
+Every run in this investigation goes in group **`eos-loop-debug`** with tag `looping`
+plus the experiment's tag (`e0`…`e4`). Run names are `<experiment>-<job>-<change>`:
+
+| Experiment | Training run (`job_type=finetune`) | Eval run (`job_type=loop-eval`) |
+|---|---|---|
+| E0 baselines | (existing adapter `run-liw4qzol`) | `e0-eval-base`, `e0-eval-ft-liw4qzol` |
+| E1 decoding | none | `e1-eval-ngram10` |
+| E2 EOS fix | `e2-train-eos-fix` | `e2-eval-eos-fix` |
+| E3 EOS fix + 200 steps | `e3-train-eos-fix-200steps` | `e3-eval-eos-fix-200steps` |
+| E4 confirm | none | `e4-eval-<winner>-test` |
+
+Smoke tests and other plumbing go in group `infra-smoke-tests`, never in `eos-loop-debug`.
+The two E0 baselines were launched before this scheme as `baseline-base` and
+`baseline-ft-liw4qzol`; they get renamed when they finish.
+
+## Running
+
+```bash
+# eval (spawns, prints CALL_ID; results come back as a dict with predictions)
+uv run modal run --detach -m cartridges.training.finetune::run_loop_eval \
+    --run-name e1-eval-ngram10 --tags e1 --items data/train/loop_eval/manifest.jsonl \
+    --model-source artifact --hf-revision run-liw4qzol --no-repeat-ngram-size 10
+
+# retrain
+uv run modal run --detach -m cartridges.training.finetune::run_finetune \
+    --config-file configs/finetune/eos_fix_100steps.yaml
+```
+
+## Done when
+
+- `loop_rate == 0` on the loop set and on the full test split
+- Test median CER no worse than the current adapter (19%) by more than 1 point
+
+## Results log
+
+| Run | Model | Change | loop_rate | n_looped / n | mean CER | W&B |
+|---|---|---|---|---|---|---|
+| E0 `e0-eval-base` | base DeepSeek-OCR-2 | none (infer() defaults) | **0.240** (test 0.321) | 93 / 387 | 1208% (median 77%) | [xz1yd8c3](https://wandb.ai/conle-ai/cartridges/runs/xz1yd8c3) |
+| E0 `e0-eval-ft-liw4qzol` | adapter `run-liw4qzol` | none (infer() defaults) | **0.062** (test 0.077) | 24 / 387 | 256% (median 14.3%) | [yrbjfidv](https://wandb.ai/conle-ai/cartridges/runs/yrbjfidv) |
+
+E0 notes: 9 pages loop under both models, 84 only under the base model, 15 only under the
+fine-tuned one. Eval set built from these: `data/train/loop_eval/manifest.jsonl`, 108 loop
+pages (79 train, 29 test) + 108 control pages (94 train, 14 test). The fine-tuned model
+decodes at ~9 tok/s median vs ~19 tok/s for the base model.
