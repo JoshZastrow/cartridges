@@ -104,10 +104,13 @@ class TrainConfig(BaseModel):
 class DecodingConfig(BaseModel):
     """Overrides for the generate() kwargs DeepSeek-OCR-2's model.infer()
     hardcodes (eval_mode: greedy, no_repeat_ngram_size=35, eos_token_id=
-    tokenizer.eos_token_id). None keeps infer()'s own value."""
+    tokenizer.eos_token_id). None keeps infer()'s own value.
 
-    no_repeat_ngram_size: int | None = None
-    repetition_penalty: float | None = None
+    Defaults are the looping investigation's pick (E1b in
+    docs/plans/loop-elimination.md): n-gram 10 + repetition penalty 1.05."""
+
+    no_repeat_ngram_size: int | None = 10
+    repetition_penalty: float | None = 1.05
     eos_token_id: int | None = None
 
 

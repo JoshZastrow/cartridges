@@ -459,7 +459,7 @@ def _run_inference(
     tokenizer,
     examples: list[dict],
     config: TrainConfig,
-    decoding: DecodingConfig | None = None,
+    decoding: DecodingConfig = DecodingConfig(),
     fast_decode: bool = False,
 ) -> list[dict]:
     """Run `model.infer` over `examples`; logs per-example progress/score/errors
@@ -951,8 +951,8 @@ def run_loop_eval(
     items: str = "all",
     model_source: str = "base",
     hf_revision: str = "",
-    no_repeat_ngram_size: int | None = None,
-    repetition_penalty: float | None = None,
+    no_repeat_ngram_size: int = 10,
+    repetition_penalty: float = 1.05,
     eos_token_id: int | None = None,
     notes: str = "",
     tags: str = "",
