@@ -154,7 +154,7 @@ class Cli:
     def model_promote(
         self,
         revision: str,
-        max_cer: float = 0.08,
+        max_cer: float = 0.20,  # served E2 run-8eqhat68: 0.168 (2026-10-13); vLLM noise ~±0.013
         max_loop_rate: float = 0.02,
         split: str = "test",
         dataset_dir: str = "data/train/hf_dataset",

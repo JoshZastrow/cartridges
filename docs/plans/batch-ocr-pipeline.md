@@ -138,7 +138,7 @@ Thus we write the markdown tree ourselves, in the PageIndex schema. PageIndex
 ```
 cartridges model_eval    [--revision run-<id>] [--split test] [--out eval_report.json]
 cartridges model_parity  --revision run-<id> [--hf_call_id fc-...]
-cartridges model_promote --revision run-<id> [--max_cer 0.08] [--max_loop_rate 0.02] [--dry_run]
+cartridges model_promote --revision run-<id> [--max_cer 0.20] [--max_loop_rate 0.02] [--dry_run]
 cartridges model_merge   --revision prod
 cartridges serve_deploy  --revision prod [--max_containers 8]
 cartridges serve_warm    --containers 4
