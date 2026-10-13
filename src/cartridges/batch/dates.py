@@ -10,9 +10,13 @@ are written in order, so the timeline is evidence too:
 - resolve_years() picks one year per dated page for the whole document at
   once (dynamic programming), favouring dates that move forward, small gaps,
   a matching written weekday, and the written year, in that order of weight.
+- A numeric month may be a misread too ("11/7/22" for "1/7/22"): resolve_years
+  also considers months one plausible misread away (_month_variants) at a
+  cost, so a date far outside the timeline gets its month replaced when that fits.
 - page_dates() labels every page: "2024-10-21" (dated), "2024-10-21 (cont.)"
-  (carried from the last dated page), "2024-10-21 (?)" (the chosen date still
-  conflicts: weekday or a jump back), or "unknown" before the first date.
+  (carried from the last dated page), "2024-10-21 (?)" (month replaced, or the
+  chosen date still conflicts: weekday or a jump back), or "unknown" before
+  the first date.
 
 Rules only, no model: deterministic and free.
 """
@@ -37,6 +41,7 @@ COST_WEEKDAY_MISMATCH = 3.0
 COST_SMALL_STEP_BACK = 1.0  # a few weeks back: entries written out of order
 COST_BIG_STEP_BACK = 10.0
 COST_PER_YEAR_FORWARD = 1.0
+COST_MONTH_MISREAD = 2.0  # > a small step back, < a big one
 SAME_DAY_DAYS = 3
 SMALL_STEP_BACK_DAYS = 45
 
@@ -68,6 +73,7 @@ class WrittenDate(NamedTuple):
     day: int
     year: int | None  # as read; may be wrong
     weekday: int | None  # 0 = Monday, as read
+    month_text: str = ""  # the month as written ("11", "Nov."), for misread repair
 
 
 def read_date(text: str) -> WrittenDate | None:
@@ -93,14 +99,19 @@ def read_date(text: str) -> WrittenDate | None:
             weekday = _WEEKDAY.search(line)
             if weekday is None and i > 0 and len(lines[i - 1]) <= DATE_MAX_OFFSET:
                 weekday = _WEEKDAY.search(lines[i - 1])
-            return WrittenDate(month, day, year, _WEEKDAYS.index(weekday.group(1).lower()) if weekday else None)
+            return WrittenDate(
+                month, day, year,
+                _WEEKDAYS.index(weekday.group(1).lower()) if weekday else None,
+                parts.get("nmonth") or parts["month"],
+            )
     return None
 
 
 def resolve_years(found: list[WrittenDate]) -> list[tuple[datetime.date, bool] | None]:
     """One (date, unsure) per written date, choosing years for the whole
     sequence at once. None if no year fits (no year written anywhere, or an
-    impossible day). unsure: the chosen date's weekday or step back conflicts."""
+    impossible day). unsure: the month was replaced, or the chosen date's
+    weekday or step back conflicts."""
     written_years = [w.year for w in found if w.year is not None]
     if not written_years:
         return [None] * len(found)
@@ -108,6 +119,8 @@ def resolve_years(found: list[WrittenDate]) -> list[tuple[datetime.date, bool] |
 
     def own_cost(w: WrittenDate, d: datetime.date) -> float:
         cost = COST_YEAR_NOT_AS_WRITTEN if w.year is not None and d.year != w.year else 0.0
+        if d.month != w.month:
+            cost += COST_MONTH_MISREAD
         if w.weekday is not None and d.weekday() != w.weekday:
             cost += COST_WEEKDAY_MISMATCH
         return cost
@@ -115,7 +128,8 @@ def resolve_years(found: list[WrittenDate]) -> list[tuple[datetime.date, bool] |
     # best[i][d] = (cost of the best timeline ending with page i on date d, previous date)
     best: list[dict[datetime.date, tuple[float, datetime.date | None]]] = []
     for w in found:
-        options = [d for y in years if (d := _date(y, w.month, w.day)) is not None]
+        months = {w.month} | _month_variants(w.month_text, w.month)
+        options = [d for y in years for m in months if (d := _date(y, m, w.day)) is not None]
         step: dict[datetime.date, tuple[float, datetime.date | None]] = {}
         prev = next((b for b in reversed(best) if b), None)
         for d in options:
@@ -146,8 +160,10 @@ def resolve_years(found: list[WrittenDate]) -> list[tuple[datetime.date, bool] |
         if d is None:
             out.append(None)
             continue
-        unsure = (w.weekday is not None and d.weekday() != w.weekday) or (
-            prev_date is not None and (prev_date - d).days > SMALL_STEP_BACK_DAYS
+        unsure = (
+            d.month != w.month
+            or (w.weekday is not None and d.weekday() != w.weekday)
+            or (prev_date is not None and (prev_date - d).days > SMALL_STEP_BACK_DAYS)
         )
         out.append((d, unsure))
         prev_date = d
@@ -171,6 +187,30 @@ def page_dates(texts: list[str]) -> list[str]:
         else:
             labels.append(UNKNOWN_DATE)
     return labels
+
+
+# Handwritten digits the OCR confuses, both ways.
+_CONFUSED_DIGITS = {"1": "7", "7": "1", "3": "8", "8": "3", "4": "9", "9": "4", "5": "6", "6": "5"}
+
+
+def _month_variants(text: str, month: int) -> set[int]:
+    """Months one plausible misread from a numeric month: drop or add a
+    leading 1 ("11" <-> "1", "12" <-> "2") or swap a confusable digit
+    ("1" <-> "7"). A written month name is not varied: on real pages the
+    names read reliably, and an out-of-place named date is usually a misread
+    day, which this can't repair (it stays flagged)."""
+    if not text.isdigit():
+        return set()
+    digits = text.lstrip("0") or text
+    out = set()
+    if len(digits) == 2 and digits[0] == "1":
+        out.add(int(digits[1]))
+    if len(digits) == 1:
+        out.add(int("1" + digits))
+    for i, c in enumerate(digits):
+        if c in _CONFUSED_DIGITS:
+            out.add(int(digits[:i] + _CONFUSED_DIGITS[c] + digits[i + 1:]))
+    return {m for m in out if 1 <= m <= 12 and m != month}
 
 
 def _step_cost(prev: datetime.date, cur: datetime.date) -> float:

@@ -20,7 +20,8 @@ from cartridges.batch.dates import WrittenDate, page_dates, read_date
     ],
 )
 def test_read_date(text, expected):
-    assert read_date(text) == expected
+    found = read_date(text)
+    assert (found[:4] if found else None) == (expected[:4] if expected else None)
 
 
 def test_only_the_first_lines_count():
@@ -63,3 +64,29 @@ def test_unresolvable_conflicts_are_marked():
 
 def test_no_year_anywhere_stays_unknown():
     assert page_dates(["Monday, June 13th", "body"]) == ["unknown", "unknown"]
+
+
+def test_month_misread_is_replaced_when_out_of_the_window():
+    # "11/7/22" between Jan 6 and Feb 11, 2022: "1" is one edit from "11".
+    texts = ["> 1/6/22", "## 11/7/22", "## 2/11/22", "## 2/14/22"]
+    assert page_dates(texts) == ["2022-01-06", "2022-01-07 (?)", "2022-02-11", "2022-02-14"]
+
+
+def test_month_is_kept_when_no_plausible_misread_fits():
+    # Aug 30 between Jan 6 and Feb 11: "8" misreads as 3 or 18, neither fits.
+    texts = ["1/6/22", "8/30/22", "2/11/22"]
+    assert page_dates(texts)[1].startswith("2022-08-30")
+
+
+def test_month_variants():
+    from cartridges.batch.dates import _month_variants
+
+    assert _month_variants("11", 11) == {1}  # drop the leading 1 (17 and 71 are not months)
+    assert _month_variants("2", 2) == {12}
+    assert _month_variants("Jun", 6) == set()  # month names are not varied
+    assert _month_variants("8", 8) == {3}
+
+
+def test_entries_a_few_days_out_of_order_are_left_alone():
+    texts = ["D: 12/11/21", "D: 12/21/21", "D: 12/5/21", "D: 12/16/21"]
+    assert page_dates(texts) == ["2021-12-11", "2021-12-21", "2021-12-05", "2021-12-16"]
