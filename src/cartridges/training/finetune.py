@@ -399,8 +399,10 @@ def _train(
             trainer.push_to_hub()
             run_date = datetime.date.today().isoformat()
             api = HfApi()
-            for tag in (f"date-{run_date}", f"run-{run.id if run else 'unknown'}"):
-                api.create_tag(config.hf_repo_id, tag=tag, revision="main")
+            # run-<id> first: it is unique. date-<day> already exists after the
+            # first run of a day; exist_ok keeps it on that day's first run.
+            for tag in (f"run-{run.id if run else 'unknown'}", f"date-{run_date}"):
+                api.create_tag(config.hf_repo_id, tag=tag, revision="main", exist_ok=True)
 
     logger.info("train done: wandb_run_url=%s", run.url if run else None)
     return {
