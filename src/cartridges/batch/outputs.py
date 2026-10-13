@@ -19,11 +19,11 @@ import json
 import re
 from pathlib import Path
 
+from cartridges.batch.dates import UNKNOWN_DATE, page_dates
 from cartridges.datagen.loaders import format_pdf_page, sanitize_page_text
 from cartridges.storage.cache import PageRow
 
 MISSING_TEXT = "[missing: this page failed OCR]"
-UNKNOWN_DATE = "unknown"
 # PageIndex md mode reads a line as a heading if it starts with 1-6 "#" and a
 # space. OCR text can contain such lines. Escape them, so that only our own
 # headings make tree nodes.
@@ -41,8 +41,14 @@ def _page_texts(page_keys: tuple[str, ...], rows: dict[str, PageRow]) -> list[tu
     return out
 
 
+def _dates(pages: list[tuple[int, str, str]]) -> list[str]:
+    """Header date per page from its OCR text (batch.dates); failed pages
+    have no text to read, so they only carry the date forward."""
+    return page_dates([text if status != "missing" else "" for _, text, status in pages])
+
+
 def transcript_md(pages: list[tuple[int, str, str]]) -> str:
-    sections = [format_pdf_page(n, text, UNKNOWN_DATE) for n, text, _ in pages]
+    sections = [format_pdf_page(n, text, date) for (n, text, _), date in zip(pages, _dates(pages))]
     return "\n---\n".join(section.rstrip() for section in sections) + "\n"
 
 
@@ -56,12 +62,12 @@ def pageindex(doc_name: str, pages: list[tuple[int, str, str]]) -> tuple[str, di
     markdown, and start_index/end_index are page numbers."""
     lines = [f"# {doc_name}", ""]
     children = []
-    for n, text, _ in pages:
+    for (n, text, _), date in zip(pages, _dates(pages)):
         body = _HEADING_RE.sub(r"\1\\\2", sanitize_page_text(text))
-        lines.append(f"## {page_title(n)}")
+        lines.append(f"## {page_title(n, date)}")
         children.append(
             {
-                "title": page_title(n),
+                "title": page_title(n, date),
                 "node_id": f"{len(children) + 1:04d}",
                 "line_num": len(lines),
                 "start_index": n,
@@ -107,7 +113,10 @@ def write_document(
         "dpi": dpi,
         "model_sha": model_sha,
         "model_id": model_key,
-        "pages": [{"page_number": n, "status": status} for n, _, status in pages],
+        "pages": [
+            {"page_number": n, "status": status, "date": date}
+            for (n, _, status), date in zip(pages, _dates(pages))
+        ],
     }
     (doc_dir / "transcript.md").write_text(transcript_md(pages))
     (doc_dir / "pageindex.md").write_text(markdown)
