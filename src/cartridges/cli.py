@@ -133,6 +133,24 @@ class Cli:
         Path(out).write_text(report.model_dump_json(indent=2) + "\n")
         _print_json({"report": out, **report.model_dump(exclude={"predictions"})})
 
+    def eval_review(
+        self,
+        results_dir: str = "data/train/loop_eval/results",
+        out: str = "data/train/loop_eval/review.html",
+        runs: str = "",
+    ) -> None:
+        """Write a local HTML page to review eval predictions against labels.
+
+        Reads every <run>.json in results_dir (or only the comma-separated
+        `runs`, in that order; the last one is shown first, compared with the
+        first). Filters: journal, split, loop/control set, looped, data-quality
+        flags, heading labels, min CER, label text. Open `out` in a browser.
+        """
+        from cartridges.training.review import build_review
+
+        run_list = [r.strip() for r in runs.split(",") if r.strip()] if runs else None
+        _print_json(build_review(Path(results_dir), Path(out), run_list))
+
     def model_promote(
         self,
         revision: str,
