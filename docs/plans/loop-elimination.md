@@ -175,3 +175,11 @@ inputs with the training collator. A, B and E2 use the fixed path; compare them 
   E3 (200 steps) and E4 dropped. Before production: merge E2, serve on vLLM with matching
   decoding (check how the server's n-gram processor maps to HF's whole-sequence rule) and
   re-run the 212 pages through the server. The HF-vs-vLLM CER gap is tracked separately.
+
+**Deployed, 2026-10-13.** `serve_deploy --revision run-8eqhat68 --ngram_size 10
+--repetition_penalty 1.05` (model id `d87b04bd…`, merged sha `c670c66c`). Served eval on the
+76-page test split: corpus CER **0.168** (median 0.105), loop_rate **0**, 0 errors, 3.8
+pages/s; no near-duplicate-line loops or outputs > 1.5× the label. For reference, the old
+adapter on vLLM at 35 / 1.0 scored 0.185 on the same split. Note: `loop_rate` only catches
+exact end-of-page repeats; with n-gram 10 a loop can mutate one word per repeat and go
+undetected (HF E2 Morning_Pages/128 ran to the cap this way), so check near-duplicate lines too.
