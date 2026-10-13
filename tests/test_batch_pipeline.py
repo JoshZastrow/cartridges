@@ -11,6 +11,7 @@ from cartridges.batch.pipeline import process
 from cartridges.storage.cache import PageRow, SourceFile
 
 MODEL_SHA = "abc123"
+MODEL_ID = "recipe-hash-1"
 
 
 class MemoryStore:
@@ -43,8 +44,8 @@ class FakeBackend:
         self.in_flight = 0
         self.max_in_flight = 0
 
-    async def served_model(self):
-        return MODEL_SHA
+    async def model_id(self):
+        return MODEL_ID
 
     async def transcribe(self, png):
         assert png.startswith(b"\x89PNG")
@@ -79,7 +80,7 @@ def run(paths, backend, store, **kwargs):
     kwargs.setdefault("render_workers", 1)
     kwargs.setdefault("retry_base_s", 0.0)
     kwargs.setdefault("dpi", 36)
-    return asyncio.run(process(paths, backend=backend, store=store, model_sha=MODEL_SHA, **kwargs))
+    return asyncio.run(process(paths, backend=backend, store=store, model_id=MODEL_ID, model_sha=MODEL_SHA, **kwargs))
 
 
 # --- keys ---------------------------------------------------------------------
@@ -90,15 +91,6 @@ def test_page_key_changes_with_each_input():
     assert base == keys.page_key("f", 1, 250)
     variants = {keys.page_key("g", 1, 250), keys.page_key("f", 2, 250), keys.page_key("f", 1, 300)}
     assert base not in variants and len(variants) == 3
-
-
-def test_model_key_changes_with_model_and_decoding():
-    d = keys.DecodingSettings()
-    base = keys.model_key("sha1", d)
-    assert base == keys.model_key("sha1", keys.DecodingSettings())
-    assert base != keys.model_key("sha2", d)
-    assert base != keys.model_key("sha1", d.model_copy(update={"max_tokens": 2048}))
-    assert base != keys.model_key("sha1", d.model_copy(update={"prompt": "OCR."}))
 
 
 def test_file_key_is_content_hash(tmp_path):
@@ -196,7 +188,7 @@ def test_wrong_served_model_stops_the_run(tmp_path):
     pdf = make_pdf(tmp_path / "notes.pdf", 1)
 
     class OtherModel(FakeBackend):
-        async def served_model(self):
+        async def model_id(self):
             return "other"
 
     with pytest.raises(RuntimeError, match="serves model"):

@@ -73,8 +73,8 @@ class DocReport(BaseModel):
 
 
 class RunReport(BaseModel):
+    model_id: str
     model_sha: str
-    model_key: str
     dpi: int
     dry_run: bool
     docs: list[DocReport]
@@ -137,8 +137,8 @@ async def process(
     *,
     backend: OcrBackend,
     store: PageStore,
+    model_id: str,
     model_sha: str,
-    decoding: keys.DecodingSettings = keys.DecodingSettings(),
     dpi: int = 250,
     concurrency: int = 64,
     queue_size: int | None = None,
@@ -150,7 +150,7 @@ async def process(
     out_dir: Path | None = None,
 ) -> RunReport:
     start = time.monotonic()
-    model_key = keys.model_key(model_sha, decoding)
+    model_key = model_id  # the recipe hash: weights + all settings
 
     docs = [await describe_doc(p, store, dpi) for p in paths]
     reports = {
@@ -170,20 +170,20 @@ async def process(
                 reports[doc.path].looped += row.status == "looped"
 
     report = RunReport(
-        model_sha=model_sha, model_key=model_key, dpi=dpi, dry_run=dry_run,
+        model_id=model_id, model_sha=model_sha, dpi=dpi, dry_run=dry_run,
         docs=list(reports.values()),
     )
     logger.info(
-        "plan: docs=%d pages=%d cached=%d to_process=%d model_sha=%s",
+        "plan: docs=%d pages=%d cached=%d to_process=%d model_id=%s model_sha=%s",
         len(docs), sum(r.pages for r in report.docs), sum(r.cached for r in report.docs),
-        len(jobs), model_sha,
+        len(jobs), model_id, model_sha,
     )
 
     if jobs and not dry_run:
-        served = await backend.served_model()
-        if served != model_sha:
+        served = await backend.model_id()
+        if served != model_id:
             raise RuntimeError(
-                f"server serves model {served!r}, but the run expects {model_sha!r}. "
+                f"server serves model {served!r}, but the run expects {model_id!r}. "
                 "Deploy the expected revision first (cartridges serve_deploy)."
             )
         await _run_jobs(

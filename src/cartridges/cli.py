@@ -112,7 +112,26 @@ class Cli:
             response.model_source, response.hf_revision, response.total_s,
         )
 
-    # --- model registry (see docs/plans/batch-ocr-pipeline.md) ---------------
+    # --- model registry and eval (see docs/plans/batch-ocr-pipeline.md) -------
+
+    def model_eval(
+        self,
+        revision: str = "",
+        split: str = "test",
+        dataset_dir: str = "data/train/hf_dataset",
+        out: str = "eval_report.json",
+        concurrency: int = 32,
+    ) -> None:
+        """Evaluate the deployed OCR service on a labeled split.
+
+        Sends each page to the same /ocr endpoint that production uses, then
+        scores corpus CER, median CER, and loop rate. revision: if given, the
+        command checks that the deployed model is that revision. Writes the
+        full report to `out` and prints the summary. Needs VLLM_API_KEY.
+        """
+        report = _eval_served(revision, split, dataset_dir, concurrency)
+        Path(out).write_text(report.model_dump_json(indent=2) + "\n")
+        _print_json({"report": out, **report.model_dump(exclude={"predictions"})})
 
     def model_promote(
         self,
@@ -120,21 +139,34 @@ class Cli:
         max_cer: float = 0.08,
         max_loop_rate: float = 0.02,
         split: str = "test",
+        dataset_dir: str = "data/train/hf_dataset",
+        concurrency: int = 32,
         dry_run: bool = False,
     ) -> None:
-        """Evaluate an adapter revision. If it passes the thresholds, tag it
+        """Evaluate a deployed adapter revision through the OCR service. If
+        it passes the thresholds (corpus CER, loop rate, no errors), tag it
         verified-<date>-<sha7> and move the tag prod to it.
 
-        Prints a JSON result. Exit code 2 if the revision does not pass.
-        dry_run=True evaluates and checks, but does not change the tags.
+        Deploy the revision first (serve_deploy). Prints a JSON result. Exit
+        code 2 if the revision does not pass. dry_run=True evaluates and
+        checks, but does not change the tags.
         """
-        from cartridges.serve.registry import check_promotion, resolve_revision, tag_verified
+        from cartridges.serve.registry import BASE, check_promotion, tag_verified
 
-        sha = resolve_revision(revision)
-        predictions = _run_eval(sha, split)
-        result = check_promotion(predictions, max_cer=max_cer, max_loop_rate=max_loop_rate)
-        tags = tag_verified(sha) if result.passed and not dry_run else []
-        _print_json({"revision": revision, "sha": sha, "tags": tags, **result.model_dump()})
+        report = _eval_served(revision, split, dataset_dir, concurrency)
+        result = check_promotion(
+            n=report.n, n_errors=report.n_errors, corpus_cer=report.corpus_cer,
+            loop_rate=report.loop_rate, max_cer=max_cer, max_loop_rate=max_loop_rate,
+        )
+        promote = result.passed and not dry_run and report.model_sha != BASE
+        tags = tag_verified(report.model_sha) if promote else []
+        _print_json(
+            {
+                "revision": revision, "model_sha": report.model_sha, "model_id": report.model_id,
+                "corpus_cer": report.corpus_cer, "loop_rate": report.loop_rate,
+                "n_errors": report.n_errors, "tags": tags, **result.model_dump(),
+            }
+        )
         if not result.passed:
             raise SystemExit(2)
 
@@ -147,11 +179,11 @@ class Cli:
         concurrency: int = 16,
         hf_call_id: str = "",
     ) -> None:
-        """Phase 0: compare the deployed vLLM server with the training eval
-        path (unsloth + PEFT + model.infer) on the same dataset images.
+        """Cross-check: compare the deployed OCR service with the training
+        eval path (finetune.evaluate: unsloth + PEFT) on the same images.
 
         `revision` must be the deployed revision (serve_deploy first). The HF
-        eval and the vLLM requests run at the same time. Writes the full
+        eval and the service requests run at the same time. Writes the full
         report to `out` and prints the summary. Exit code 2 if parity fails.
         Needs VLLM_API_KEY.
 
@@ -160,52 +192,35 @@ class Cli:
         call and does not start a new eval.
         """
         import asyncio
-        import io
         import json
-        import os
 
-        from datasets import load_from_disk
+        from cartridges.serve.evaluate import transcribe_all
+        from cartridges.serve.parity import compare
 
-        from cartridges.batch.backends import VllmBackend
-        from cartridges.serve.parity import PARITY_DECODING, compare, vllm_predictions
-        from cartridges.serve.registry import deployed, resolve_revision
-
-        sha = resolve_revision(revision)
-        record = deployed()
-        if record is None or record["model_sha"] != sha:
-            raise SystemExit(f"deployed model is {record}; run `cartridges serve_deploy --revision {revision}`")
-
-        examples = list(load_from_disk(dataset_dir)[split])
-        references = [e["text"] for e in examples]
-        images = []
-        for e in examples:
-            buf = io.BytesIO()
-            e["image"].save(buf, format="PNG")  # same bytes as eval's .save(<path>.png)
-            images.append(buf.getvalue())
+        record = _require_deployed(revision)
+        sha = record["model_sha"]
+        references, images = _load_split(dataset_dir, split)
         logger.info("parity: revision=%s sha=%s split=%s n=%d", revision, sha, split, len(images))
 
         async def run():
-            backend = VllmBackend(
-                _serve_function().get_web_url(), api_key=os.environ["VLLM_API_KEY"],
-                decoding=PARITY_DECODING, max_connections=concurrency,
-            )
+            backend = _service_backend(concurrency)
             try:
                 hf_task = asyncio.create_task(asyncio.to_thread(_run_eval, sha, split, hf_call_id))
-                vllm = await vllm_predictions(images, backend, concurrency)
-                logger.info("parity: vLLM done (%d/%d ok); waiting for HF eval",
-                            sum(v is not None for v in vllm), len(vllm))
-                return await hf_task, vllm
+                served = await transcribe_all(images, backend, concurrency)
+                logger.info("parity: service done (%d/%d ok); waiting for HF eval",
+                            sum(v is not None for v in served), len(served))
+                return await hf_task, served
             finally:
                 await backend.aclose()
 
-        predictions, vllm = asyncio.run(run())
+        predictions, served = asyncio.run(run())
         if [p["reference"] for p in predictions] != references:
             raise SystemExit(
                 "HF eval references differ from the local dataset; rebuild the "
                 "training image or point --dataset_dir at the same data"
             )
         report = compare(
-            references, [p["hypothesis"] for p in predictions], vllm,
+            references, [p["hypothesis"] for p in predictions], served,
             revision=revision, model_sha=sha,
         )
         Path(out).write_text(json.dumps(report.model_dump(), indent=2, ensure_ascii=False) + "\n")
@@ -225,19 +240,23 @@ class Cli:
     def serve_deploy(
         self, revision: str = "prod", max_containers: int = 8, max_num_seqs: int = 32
     ) -> None:
-        """Deploy the vLLM server for `revision` ("base" for the base model).
+        """Deploy the OCR service for `revision` ("base" for the base model).
 
-        Merges the adapter first if necessary. The deploy does not start a
-        GPU container; the first request (or serve_warm) does.
+        Merges the adapter first if necessary. The service runs the default
+        OcrRecipe for those weights; the model id is the recipe hash. The
+        deploy does not start a GPU container; the first request (or
+        serve_warm) does.
         """
         import os
 
+        from cartridges.serve.recipe import OcrRecipe
         from cartridges.serve.registry import BASE, record_deploy, resolve_revision
 
         sha = resolve_revision(revision)
         if sha != BASE:
             _merge(sha)
-        os.environ["CARTRIDGES_OCR_MODEL_SHA"] = sha
+        recipe = OcrRecipe(model_sha=sha)
+        os.environ["CARTRIDGES_OCR_RECIPE"] = recipe.model_dump_json()
         os.environ["CARTRIDGES_OCR_MAX_CONTAINERS"] = str(max_containers)
         os.environ["CARTRIDGES_OCR_MAX_NUM_SEQS"] = str(max_num_seqs)
         import modal
@@ -246,7 +265,7 @@ class Cli:
 
         with modal.enable_output():
             app.deploy()
-        _print_json({**record_deploy(revision, sha), "url": _serve_function().get_web_url()})
+        _print_json({**record_deploy(revision, recipe), "url": _serve_function().get_web_url()})
 
     def serve_status(self) -> None:
         """Print the deployed model, the URL, and the container counts. This
@@ -283,49 +302,38 @@ class Cli:
         concurrency: int = 64,
         containers: int = 0,
         dpi: int = 250,
-        max_tokens: int = 1024,
         retry_flagged: bool = False,
         dry_run: bool = False,
     ) -> None:
         """OCR all pages of the PDFs (or of all *.pdf in a directory) with the
         deployed model. Write the outputs to `out`.
 
-        Pages already in the cache for this file and this model are not sent
-        again. containers=K pre-warms K GPU containers for the run and sets
-        the minimum back to 0 at the end. Needs DATABASE_URL, and
+        Pages already in the cache for this file and this model id are not
+        sent again. containers=K pre-warms K GPU containers for the run and
+        sets the minimum back to 0 at the end. Needs DATABASE_URL, and
         VLLM_API_KEY unless dry_run.
 
         Prints a JSON report to stdout (logs go to stderr). Exit code 0: all
         pages OK. 2: one or more pages failed or are looped. 1: fatal error.
         """
         import asyncio
-        import os
 
-        from cartridges.batch.backends import VllmBackend
-        from cartridges.batch.keys import DecodingSettings
         from cartridges.batch.pipeline import process
-        from cartridges.serve.registry import deployed
         from cartridges.storage.cache import PostgresPageStore
 
         paths = _pdf_paths(pdfs)
-        record = deployed()
-        if record is None:
-            raise SystemExit("no deployed model; run `cartridges serve_deploy` first")
+        record = _require_deployed("")
         fn = _serve_function()
 
         async def run():
             store = await PostgresPageStore.connect()
-            backend = VllmBackend(
-                fn.get_web_url(),
-                api_key=os.environ.get("VLLM_API_KEY", "") if not dry_run else "",
-                decoding=DecodingSettings(max_tokens=max_tokens),
-                max_connections=concurrency,
-            )
+            backend = _service_backend(concurrency, require_key=not dry_run)
             try:
                 return await process(
-                    paths, backend=backend, store=store, model_sha=record["model_sha"],
-                    decoding=backend.decoding, dpi=dpi, concurrency=concurrency,
-                    retry_flagged=retry_flagged, dry_run=dry_run, out_dir=Path(out),
+                    paths, backend=backend, store=store,
+                    model_id=record["model_id"], model_sha=record["model_sha"],
+                    dpi=dpi, concurrency=concurrency, retry_flagged=retry_flagged,
+                    dry_run=dry_run, out_dir=Path(out),
                 )
             finally:
                 await backend.aclose()
@@ -377,6 +385,81 @@ def _serve_function():
     import modal
 
     return modal.Function.from_name("cartridges-ocr-vllm", "serve")
+
+
+def _require_deployed(revision: str) -> dict:
+    """The deploy record. If `revision` is given, check that it is deployed."""
+    from cartridges.serve.registry import deployed, resolve_revision
+
+    record = deployed()
+    if record is None or "model_id" not in record:
+        raise SystemExit("no deployed OCR service; run `cartridges serve_deploy` first")
+    if revision and resolve_revision(revision) != record["model_sha"]:
+        raise SystemExit(
+            f"deployed revision is {record['revision']!r} ({record['model_sha'][:8]}); "
+            f"run `cartridges serve_deploy --revision {revision}` first"
+        )
+    return record
+
+
+def _load_split(dataset_dir: str, split: str) -> tuple[list[str], list[bytes]]:
+    """(references, PNG bytes) of a labeled split. Same bytes as eval's
+    example["image"].save(<path>.png)."""
+    import io
+
+    from datasets import load_from_disk
+
+    references, images = [], []
+    for example in load_from_disk(dataset_dir)[split]:
+        buf = io.BytesIO()
+        example["image"].save(buf, format="PNG")
+        references.append(example["text"])
+        images.append(buf.getvalue())
+    return references, images
+
+
+def _service_backend(concurrency: int, require_key: bool = True):
+    import os
+
+    from cartridges.batch.backends import OcrServiceBackend
+
+    api_key = os.environ["VLLM_API_KEY"] if require_key else os.environ.get("VLLM_API_KEY", "")
+    return OcrServiceBackend(
+        _serve_function().get_web_url(), api_key=api_key, max_connections=concurrency
+    )
+
+
+def _eval_served(revision: str, split: str, dataset_dir: str, concurrency: int):
+    """Evaluate the deployed OCR service on a labeled split (serve.evaluate)."""
+    import asyncio
+    import time
+
+    from cartridges.serve.evaluate import EvalReport, score, transcribe_all
+
+    record = _require_deployed(revision)
+    references, images = _load_split(dataset_dir, split)
+
+    async def run():
+        backend = _service_backend(concurrency)
+        try:
+            # /info first: it waits for a cold start, so the timing below
+            # measures transcription only.
+            served = await backend.model_id()
+            if served != record["model_id"]:
+                raise SystemExit(f"service serves {served}, deploy record says {record['model_id']}")
+            logger.info("eval: model_id=%s split=%s n=%d", served, split, len(images))
+            start = time.monotonic()
+            hypotheses = await transcribe_all(images, backend, concurrency)
+            return hypotheses, time.monotonic() - start
+        finally:
+            await backend.aclose()
+
+    hypotheses, elapsed = asyncio.run(run())
+    return EvalReport(
+        model_id=record["model_id"], model_sha=record["model_sha"], revision=record["revision"],
+        split=split, elapsed_s=elapsed, pages_per_s=len(images) / elapsed,
+        **score(references, hypotheses),
+    )
 
 
 def _run_eval(sha: str, split: str, call_id: str = "") -> list[dict]:

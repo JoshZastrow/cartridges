@@ -7,14 +7,10 @@ PEFT (adapter not merged) and `model.infer()`:
 - greedy decoding, no_repeat_ngram_size 35 over the full output;
 - max_new_tokens capped at TrainConfig.max_new_tokens.
 
-PARITY_DECODING sets the vLLM request to the same values:
-- the prompt: vLLM's default template gives BOS + image tokens + "\\n" +
-  "Free OCR. ". Checked with /tokenize on the deployed server: token ids
-  0, 128815 x N, 201, 21431, 126041, 16, 223 (the same as the HF prompt);
-- ngram_size 35 with a window larger than max_model_len (8192) is equal to
-  no_repeat_ngram_size 35 over the full output;
-- no whitelist (HF has none).
-vLLM's DeepSeek-OCR-2 processor defaults are already 1024 / 768 / crop on.
+The default OcrRecipe (serve/recipe.py) sets the served model to the same
+values, so the vLLM side is the plain /ocr service. The prompt was checked
+with /tokenize on the deployed server: token ids 0, 128815 x N, 201, 21431,
+126041, 16, 223 (the same as the HF prompt).
 
 The outputs are not identical bit for bit: the kernels are different, and
 merged bf16 weights round differently. Greedy decoding can then go a
@@ -27,23 +23,8 @@ Pass condition (docs/plans/batch-ocr-pipeline.md, Phase 0):
 
 from __future__ import annotations
 
-import asyncio
-import logging
-
 from pydantic import BaseModel
 
-from cartridges.batch.backends import OcrBackend
-from cartridges.batch.keys import DecodingSettings
-from cartridges.training.config import TrainConfig
-
-logger = logging.getLogger(__name__)
-
-PARITY_DECODING = DecodingSettings(
-    max_tokens=TrainConfig().max_new_tokens,
-    ngram_size=35,
-    window_size=8192,
-    whitelist_token_ids=(),
-)
 MAX_CER_GAP = 0.01
 MAX_CROSS_CER = 0.02
 
@@ -147,21 +128,3 @@ def compare(
         exact_rate=sum(e.exact for e in examples) / len(examples) if examples else 0.0,
         passed=not reasons, reasons=reasons, examples=examples,
     )
-
-
-async def vllm_predictions(
-    images: list[bytes], backend: OcrBackend, concurrency: int = 16
-) -> list[str | None]:
-    """Send each image one time. A failed request gives None (no retry: a
-    retry could hide a server fault that the parity check must show)."""
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def one(png: bytes) -> str | None:
-        async with semaphore:
-            try:
-                return await backend.transcribe(png)
-            except Exception:
-                logger.exception("vLLM request failed")
-                return None
-
-    return list(await asyncio.gather(*(one(png) for png in images)))

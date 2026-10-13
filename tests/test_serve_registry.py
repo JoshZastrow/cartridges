@@ -1,44 +1,46 @@
+import base64
+
+import httpx
 import pytest
 
+from cartridges.serve.evaluate import score
 from cartridges.serve.merge import lora_merge_plan, lora_scale
-from cartridges.serve.parity import PARITY_DECODING, compare, first_diff
+from cartridges.serve.parity import compare, first_diff
+from cartridges.serve.recipe import END_OF_SENTENCE, OcrRecipe
 from cartridges.serve.registry import check_promotion
-from cartridges.serve.vllm_server import vllm_command
+from cartridges.serve.vllm_server import build_app, vllm_command
+
+# --- eval scoring and promotion -----------------------------------------------
 
 
-def pred(cer, hypothesis="the cat sat", reference="the cat sat"):
-    return {"cer": cer, "hypothesis": hypothesis, "reference": reference}
+def test_score_uses_corpus_cer_and_counts_errors_and_loops():
+    looped = "and then and then and then and then"
+    metrics = score(
+        ["abcd", "efgh", "ijkl", "the end"],
+        ["abcd", "efXX", None, looped],
+    )
+    assert metrics["n"] == 4 and metrics["n_errors"] == 1
+    # corpus CER over the 3 scored pages: (0 + 2 + len edits of the loop) / chars
+    assert 0 < metrics["corpus_cer"] and metrics["n_scored"] == 3
+    assert metrics["loop_rate"] == pytest.approx(1 / 3)
+    assert [p.status for p in metrics["predictions"]] == ["ok", "ok", "error", "ok"]
 
 
-# --- check_promotion ----------------------------------------------------------
+def promotion(**overrides):
+    args = dict(n=10, n_errors=0, corpus_cer=0.05, loop_rate=0.0, max_cer=0.08, max_loop_rate=0.02)
+    return check_promotion(**{**args, **overrides})
 
 
 def test_promotion_passes_under_thresholds():
-    result = check_promotion([pred(0.05), pred(0.07)], max_cer=0.08, max_loop_rate=0.0)
+    result = promotion()
     assert result.passed and result.reasons == []
-    assert result.mean_cer == pytest.approx(0.06)
 
 
-def test_promotion_fails_on_cer():
-    result = check_promotion([pred(0.2)], max_cer=0.08, max_loop_rate=1.0)
-    assert not result.passed and "mean_cer" in result.reasons[0]
-
-
-def test_promotion_fails_on_loops_but_forgives_loops_in_the_reference():
-    looped = "and then and then and then and then"
-    preds = [pred(0.01, hypothesis=looped), pred(0.01)]
-    assert not check_promotion(preds, max_cer=0.08, max_loop_rate=0.1).passed
-
-    forgiven = [pred(0.01, hypothesis=looped, reference=looped), pred(0.01)]
-    assert check_promotion(forgiven, max_cer=0.08, max_loop_rate=0.1).passed
-
-
-def test_promotion_fails_on_errors_and_on_no_data():
-    result = check_promotion(
-        [pred(0.01), pred(None, hypothesis=None)], max_cer=0.08, max_loop_rate=1.0
-    )
-    assert result.n_errors == 1 and not result.passed
-    assert not check_promotion([], max_cer=1.0, max_loop_rate=1.0).passed
+def test_promotion_fails_on_cer_loops_errors_and_no_data():
+    assert "corpus_cer" in promotion(corpus_cer=0.2).reasons[0]
+    assert "loop_rate" in promotion(loop_rate=0.1).reasons[0]
+    assert "error rate" in promotion(n_errors=1).reasons[0]
+    assert not promotion(n=0, corpus_cer=None).passed
 
 
 # --- merge plan ---------------------------------------------------------------
@@ -114,22 +116,91 @@ def test_first_diff_on_prefix():
     assert first_diff("abc", "abcd") == 3
 
 
-def test_parity_decoding_matches_the_hf_eval_path():
-    d = PARITY_DECODING
-    assert (d.ngram_size, d.whitelist_token_ids, d.temperature) == (35, (), 0.0)
-    assert d.window_size >= 8192  # >= max_model_len: the full output
-    # vLLM's default template gives "<image>\n" + prompt: the training prompt.
+# --- recipe --------------------------------------------------------------------
+
+
+def test_recipe_model_id_changes_with_weights_and_every_setting():
+    base = OcrRecipe(model_sha="sha1")
+    assert base.model_id == OcrRecipe(model_sha="sha1").model_id
+    variants = [
+        OcrRecipe(model_sha="sha2"),
+        base.model_copy(update={"max_tokens": 2048}),
+        base.model_copy(update={"prompt": "OCR."}),
+        base.model_copy(update={"image_size": 1024}),
+        base.model_copy(update={"ngram_size": 30}),
+    ]
+    assert len({base.model_id, *(v.model_id for v in variants)}) == 6
+
+
+def test_recipe_prompt_is_the_training_prompt():
+    # vLLM's template for this model gives "<image>\n" + prompt.
     from cartridges.training.collator import FREE_OCR_PROMPT
 
-    assert "<image>\n" + d.prompt == FREE_OCR_PROMPT
+    recipe = OcrRecipe(model_sha="x")
+    assert "<image>\n" + recipe.prompt == FREE_OCR_PROMPT
+    # Greedy, no_repeat_ngram_size 35 over the full output, no whitelist.
+    assert (recipe.temperature, recipe.ngram_size, recipe.whitelist_token_ids) == (0.0, 35, ())
+    assert recipe.window_size >= 8192
 
 
-# --- server command -----------------------------------------------------------
+# --- server ---------------------------------------------------------------------
 
 
-def test_vllm_command_serves_the_sha_from_its_merged_dir():
-    command = vllm_command("abc123", 32)
+def test_vllm_command_serves_the_recipe():
+    recipe = OcrRecipe(model_sha="abc123")
+    command = vllm_command(recipe, 32)
     assert command[:3] == ["vllm", "serve", "/cache/models/abc123"]
-    assert command[command.index("--served-model-name") + 1] == "abc123"
+    assert command[command.index("--served-model-name") + 1] == recipe.model_id
+    assert '"image_size": 768' in command[command.index("--mm-processor-kwargs") + 1]
     assert "NGramPerReqLogitsProcessor" in command[command.index("--logits-processors") + 1]
-    assert vllm_command("base", 8)[2] == "/cache/deepseek_ocr"
+    assert vllm_command(OcrRecipe(model_sha="base"), 8)[2] == "/cache/deepseek_ocr"
+
+
+def fake_vllm(seen: list):
+    """An httpx client whose transport answers like vLLM chat completions."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": f"  page text{END_OF_SENTENCE}"}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 3},
+            },
+        )
+
+    return httpx.AsyncClient(base_url="http://vllm", transport=httpx.MockTransport(handler))
+
+
+def test_ocr_endpoint_applies_the_recipe():
+    from fastapi.testclient import TestClient
+
+    recipe = OcrRecipe(model_sha="abc123")
+    seen: list = []
+    client = TestClient(build_app(recipe, "key", fake_vllm(seen)))
+    auth = {"Authorization": "Bearer key"}
+
+    png = base64.b64encode(b"png-bytes").decode()
+    response = client.post("/ocr", json={"image_base64": png}, headers=auth)
+    assert response.status_code == 200
+    assert response.json() == {
+        "text": "page text", "model_id": recipe.model_id,
+        "finish_reason": "stop", "completion_tokens": 3,
+    }
+    body = seen[0]
+    assert body["model"] == recipe.model_id
+    assert body["messages"][0]["content"][1] == {"type": "text", "text": "Free OCR. "}
+    assert body["vllm_xargs"] == {"ngram_size": 35, "window_size": 8192, "whitelist_token_ids": []}
+
+    assert client.get("/info", headers=auth).json()["model_id"] == recipe.model_id
+    assert client.get("/health").status_code == 200
+
+
+def test_ocr_endpoint_needs_the_api_key():
+    from fastapi.testclient import TestClient
+
+    client = TestClient(build_app(OcrRecipe(model_sha="x"), "key", fake_vllm([])))
+    assert client.post("/ocr", json={"image_base64": ""}).status_code == 401
+    assert client.get("/info", headers={"Authorization": "Bearer wrong"}).status_code == 401

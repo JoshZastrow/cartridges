@@ -106,7 +106,7 @@ def write_document(
         "file_key": file_key,
         "dpi": dpi,
         "model_sha": model_sha,
-        "model_key": model_key,
+        "model_id": model_key,
         "pages": [{"page_number": n, "status": status} for n, _, status in pages],
     }
     (doc_dir / "transcript.md").write_text(transcript_md(pages))

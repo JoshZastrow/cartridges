@@ -119,9 +119,25 @@ PageIndex PDF mode needs a text layer. Scanned handwriting has no text layer.
 Thus we write the markdown tree ourselves, in the PageIndex schema. PageIndex
 `md_to_tree` can add LLM summaries later. This is optional.
 
+## 3.8 The packaged OCR service (recipe)
+
+- `serve/recipe.py` `OcrRecipe` holds all settings: merged weights SHA,
+  preprocessing (1024 / 768 / crop), prompt, decoding, and postprocessing.
+- The model id is the recipe hash. The cache key, the eval report, and the
+  deploy record use this id.
+- The server (`serve/vllm_server.py`) has `POST /ocr` (image in, text out),
+  `GET /info`, and `GET /health`. vLLM listens on an internal port only.
+- The eval (`model_eval`) and the pipeline (`notes_process`) both call `/ocr`.
+  Thus the eval measures the model that production uses.
+- Preprocessing check (2026-10-09): on all 78 test pages, the tile grid and the
+  global and tile pixel tensors of vLLM 0.29.0 are bit-identical to the
+  training collator. The prompt token ids on the live server are identical.
+
 ## 4. Commands
 
 ```
+cartridges model_eval    [--revision run-<id>] [--split test] [--out eval_report.json]
+cartridges model_parity  --revision run-<id> [--hf_call_id fc-...]
 cartridges model_promote --revision run-<id> [--max_cer 0.08] [--max_loop_rate 0.02] [--dry_run]
 cartridges model_merge   --revision prod
 cartridges serve_deploy  --revision prod [--max_containers 8]

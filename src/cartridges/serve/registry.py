@@ -3,7 +3,7 @@
 The registry is the HF Hub repo that training pushes to (TrainConfig.hf_repo_id).
 - resolve_revision(): a tag or branch -> the commit SHA. "base" stays "base"
   (the base model, no adapter).
-- check_promotion(): eval predictions -> pass or fail, with the reasons.
+- check_promotion(): served-model eval metrics -> pass or fail, with the reasons.
 - tag_verified(): adds the tag verified-<date>-<sha7> and moves the tag prod.
 
 The record of the deployed model is in a Modal Dict, so a client can read
@@ -16,8 +16,8 @@ import datetime
 
 from pydantic import BaseModel
 
+from cartridges.serve.recipe import OcrRecipe
 from cartridges.training.config import TrainConfig
-from cartridges.training.loops import loop_rate
 
 BASE = "base"
 HF_REPO_ID = TrainConfig().hf_repo_id
@@ -34,42 +34,32 @@ def resolve_revision(revision: str, repo_id: str = HF_REPO_ID) -> str:
 
 
 class PromotionResult(BaseModel):
-    n: int
-    n_errors: int
-    mean_cer: float | None
-    loop_rate: float
     passed: bool
     reasons: list[str]
 
 
 def check_promotion(
-    predictions: list[dict],
     *,
+    n: int,
+    n_errors: int,
+    corpus_cer: float | None,
+    loop_rate: float,
     max_cer: float,
     max_loop_rate: float,
     max_error_rate: float = 0.0,
 ) -> PromotionResult:
-    """predictions: the rows of finetune.evaluate() (keys: reference,
-    hypothesis, cer; cer is None for a failed example)."""
-    n = len(predictions)
-    scored = [p["cer"] for p in predictions if p["cer"] is not None]
-    n_errors = n - len(scored)
-    mean_cer = sum(scored) / len(scored) if scored else None
-    rate = loop_rate([p["hypothesis"] for p in predictions], [p["reference"] for p in predictions])
-
+    """Check the metrics of a served-model eval (serve.evaluate.score)
+    against the thresholds. corpus_cer is the headline CER."""
     reasons = []
     if n == 0:
         reasons.append("no predictions")
-    if mean_cer is None or mean_cer > max_cer:
-        reasons.append(f"mean_cer {mean_cer} > {max_cer}")
-    if rate > max_loop_rate:
-        reasons.append(f"loop_rate {rate:.4f} > {max_loop_rate}")
+    if corpus_cer is None or corpus_cer > max_cer:
+        reasons.append(f"corpus_cer {corpus_cer} > {max_cer}")
+    if loop_rate > max_loop_rate:
+        reasons.append(f"loop_rate {loop_rate:.4f} > {max_loop_rate}")
     if n and n_errors / n > max_error_rate:
         reasons.append(f"error rate {n_errors}/{n} > {max_error_rate}")
-    return PromotionResult(
-        n=n, n_errors=n_errors, mean_cer=mean_cer, loop_rate=rate,
-        passed=not reasons, reasons=reasons,
-    )
+    return PromotionResult(passed=not reasons, reasons=reasons)
 
 
 def tag_verified(sha: str, repo_id: str = HF_REPO_ID, today: datetime.date | None = None) -> list[str]:
@@ -89,12 +79,14 @@ def tag_verified(sha: str, repo_id: str = HF_REPO_ID, today: datetime.date | Non
     return [verified, PROD_TAG]
 
 
-def record_deploy(revision: str, model_sha: str) -> dict:
+def record_deploy(revision: str, recipe: OcrRecipe) -> dict:
     import modal
 
     record = {
         "revision": revision,
-        "model_sha": model_sha,
+        "model_sha": recipe.model_sha,
+        "model_id": recipe.model_id,
+        "recipe": recipe.model_dump(mode="json"),
         "deployed_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
     }
     modal.Dict.from_name(DEPLOY_DICT, create_if_missing=True)["serve"] = record
