@@ -111,6 +111,7 @@ uv run modal run --detach -m cartridges.training.finetune::run_finetune \
 | E0 `e0-eval-ft-liw4qzol` | adapter `run-liw4qzol` | none (infer() defaults) | **0.062** (test 0.077) | 24 / 387 | 42.1% | [yrbjfidv](https://wandb.ai/conle-ai/cartridges/runs/yrbjfidv) |
 | E0b `e0b-eval-ft-liw4qzol-fast` | adapter `run-liw4qzol` | re-baseline: fast decode, 2,560 cap, 212-page eval set | **0.071** (loop set 10/107, control 5/105) | 15 / 212 | 36.6% (mean NED 0.234) | [4bvd0h3m](https://wandb.ai/conle-ai/cartridges/runs/4bvd0h3m) |
 | E1 `e1-eval-ngram10` | adapter `run-liw4qzol` | `no_repeat_ngram_size` 35 → 10 | **0.024** (loop set 4/107, control 1/105) | 5 / 212 | 35.4% (mean NED 0.224) | [qqrnb27e](https://wandb.ai/conle-ai/cartridges/runs/qqrnb27e) |
+| E1b `e1b-eval-ngram10-rep105` | adapter `run-liw4qzol` | n-gram 10 + `repetition_penalty` 1.05 | **0.019** (loop set 3/107, control 1/105) | 4 / 212 | 34.2% (mean NED 0.219) | [quibo1kg](https://wandb.ai/conle-ai/cartridges/runs/quibo1kg) |
 
 E0 notes: 9 pages loop under both models, 84 only under the base model, 15 only under the
 fine-tuned one. Eval set built from these: `data/train/loop_eval/manifest.jsonl`, 108 loop
@@ -147,3 +148,10 @@ E0b. Per page (NED change > 0.05): 29 better, 17 worse (worst: There_He_Is 83, 9
 pages where the 10-gram block forces a wrong word on a legitimately repeated phrase). The 5
 remaining loops repeat 1–3-token phrases ("hunger,", "no,", "- Test", "I am scared.") that a
 10-token block lets through ~3+ times, and they mutate around the block ("hungry", "Tools").
+
+E1b notes: 4 of E1's 5 loops end, but 3 new ones appear (MP 260, 135; There_He_Is 57), so
+loops move rather than vanish. Only 21/212 outputs match E1 exactly: the penalty touches
+nearly every page. Per page vs E1 (NED change > 0.05): 40 better, 30 worse. Aggregates improve
+on both sets (mean NED loop 0.273 → 0.265, control 0.175 → 0.171), but the worse pages show
+penalty artefacts: invented words ("crushingishness", MP 8) and a Chinese token ("创业",
+There_He_Is 87) where the right English word had already been used.
