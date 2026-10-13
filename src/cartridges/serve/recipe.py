@@ -6,10 +6,10 @@ model id is the hash of the recipe. Thus:
 - the cache key, the eval report, and the deploy record use one id;
 - a change to any setting is a new model id, never a silent change.
 
-Defaults match the training eval path (finetune._generate_one) with
-DecodingConfig(no_repeat_ngram_size=35, repetition_penalty=1.0): the
-collator's preprocessing, the training prompt, greedy decoding, and the
-TrainConfig.max_new_tokens cap.
+Defaults match the training eval path (finetune._generate_one) with the
+default DecodingConfig (no_repeat_ngram_size=10, repetition_penalty=1.05,
+the looping investigation's pick): the collator's preprocessing, the
+training prompt, greedy decoding, and the TrainConfig.max_new_tokens cap.
 """
 
 from __future__ import annotations
@@ -43,12 +43,12 @@ class OcrRecipe(BaseModel):
     # repeated n-grams over the full output, as HF no_repeat_ngram_size does.
     max_tokens: int = TrainConfig().max_new_tokens
     temperature: float = 0.0
-    ngram_size: int = 35
+    ngram_size: int = 10
     window_size: int = 8192
     whitelist_token_ids: tuple[int, ...] = ()
     # vLLM's built-in penalty: like HF RepetitionPenaltyLogitsProcessor, it
     # applies to prompt and output tokens. 1.0 = off.
-    repetition_penalty: float = 1.0
+    repetition_penalty: float = 1.05
 
     # Postprocessing: remove these tokens, then strip whitespace.
     strip_tokens: tuple[str, ...] = (END_OF_SENTENCE,)

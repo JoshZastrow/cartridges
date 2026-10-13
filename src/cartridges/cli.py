@@ -56,61 +56,43 @@ class Cli:
         pages[page_number - 1].save(output)
         logger.info("wrote %s", output)
 
-    def ocr(
-        self,
-        image_path: str,
-        page_number: int = 1,
-        hf_revision: str = "",
-        dpi: int = 400,
-        max_new_tokens: int = 1024,
-    ) -> None:
-        """Transcribe a single image (or one page of a PDF) via the hosted model.
+    def ocr(self, image_path: str, page_number: int = 1, revision: str = "", dpi: int = 250) -> None:
+        """Transcribe one image (or one page of a PDF) with the deployed OCR
+        service: the same /ocr endpoint and recipe that notes_process uses.
 
         image_path: a .png/.jpg file, or a .pdf (page_number selects which page,
-        1-indexed). hf_revision: optional Hugging Face Hub revision (e.g.
-        "run-<wandb_run_id>" or "date-2026-09-22") in the fine-tuned adapter
-        repo (see TrainConfig.hf_repo_id) to use instead of the base model.
-        Prints the transcribed text to stdout.
+        1-indexed; rendered at `dpi`, like notes_process). revision: if given,
+        check that the deployed model is that revision (e.g. "prod").
+        Prints the transcribed text to stdout. Needs VLLM_API_KEY.
         """
-        import base64
+        import asyncio
         import io
 
-        from cartridges.serve.inference import app, generate
-        from cartridges.serve.schema import ChatMessage, GenerateRequest, ImageContent, ServeConfig
-        from cartridges.training.config import ModelSource
+        from cartridges.batch.pipeline import render_png
 
         path = Path(image_path)
         if path.suffix.lower() == ".pdf":
-            from cartridges.processors.ocr import pdf_to_images
-
-            pages = pdf_to_images(path, dpi=dpi)
-            if not (1 <= page_number <= len(pages)):
-                raise ValueError(f"page_number must be 1..{len(pages)}")
-            buf = io.BytesIO()
-            pages[page_number - 1].save(buf, format="PNG")
-            image_bytes = buf.getvalue()
+            png = render_png(str(path), page_number, dpi)
         else:
-            image_bytes = path.read_bytes()
+            from PIL import Image
 
-        request = GenerateRequest(
-            serve_config=ServeConfig(
-                model_source=ModelSource.ARTIFACT if hf_revision else ModelSource.BASE,
-                hf_revision=hf_revision or None,
-                max_new_tokens=max_new_tokens,
-            ),
-            messages=[
-                ChatMessage(content=[ImageContent(image_base64=base64.b64encode(image_bytes).decode())])
-            ],
-        )
+            buf = io.BytesIO()
+            Image.open(path).save(buf, format="PNG")
+            png = buf.getvalue()
+        record = _require_deployed(revision)
+        backend = _service_backend(concurrency=1)  # URL lookup is a blocking Modal call
 
-        with app.run():
-            response = generate.remote(request)
+        async def run():
+            try:
+                served = await backend.model_id()
+                if served != record["model_id"]:
+                    raise SystemExit(f"service serves {served}, deploy record says {record['model_id']}")
+                return await backend.transcribe(png)
+            finally:
+                await backend.aclose()
 
-        print(response.text)
-        logger.info(
-            "ocr done: model_source=%s hf_revision=%s total_s=%.1f",
-            response.model_source, response.hf_revision, response.total_s,
-        )
+        print(asyncio.run(run()))
+        logger.info("ocr done: model_id=%s revision=%s", record["model_id"], record["revision"])
 
     # --- model registry and eval (see docs/plans/batch-ocr-pipeline.md) -------
 
@@ -260,8 +242,8 @@ class Cli:
         revision: str = "prod",
         max_containers: int = 8,
         max_num_seqs: int = 32,
-        ngram_size: int = 35,
-        repetition_penalty: float = 1.0,
+        ngram_size: int = 10,
+        repetition_penalty: float = 1.05,
     ) -> None:
         """Deploy the OCR service for `revision` ("base" for the base model).
 

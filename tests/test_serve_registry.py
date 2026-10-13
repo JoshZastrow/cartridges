@@ -128,7 +128,7 @@ def test_recipe_model_id_changes_with_weights_and_every_setting():
         base.model_copy(update={"prompt": "OCR."}),
         base.model_copy(update={"image_size": 1024}),
         base.model_copy(update={"ngram_size": 30}),
-        base.model_copy(update={"repetition_penalty": 1.05}),
+        base.model_copy(update={"repetition_penalty": 1.1}),
     ]
     assert len({base.model_id, *(v.model_id for v in variants)}) == 7
 
@@ -139,8 +139,8 @@ def test_recipe_prompt_is_the_training_prompt():
 
     recipe = OcrRecipe(model_sha="x")
     assert "<image>\n" + recipe.prompt == FREE_OCR_PROMPT
-    # Greedy, no_repeat_ngram_size 35 over the full output, no whitelist.
-    assert (recipe.temperature, recipe.ngram_size, recipe.whitelist_token_ids) == (0.0, 35, ())
+    # Greedy, no_repeat_ngram_size 10 over the full output, no whitelist.
+    assert (recipe.temperature, recipe.ngram_size, recipe.whitelist_token_ids) == (0.0, 10, ())
     assert recipe.window_size >= 8192
 
 
@@ -193,8 +193,8 @@ def test_ocr_endpoint_applies_the_recipe():
     body = seen[0]
     assert body["model"] == recipe.model_id
     assert body["messages"][0]["content"][1] == {"type": "text", "text": "Free OCR. "}
-    assert body["vllm_xargs"] == {"ngram_size": 35, "window_size": 8192, "whitelist_token_ids": []}
-    assert body["repetition_penalty"] == 1.0
+    assert body["vllm_xargs"] == {"ngram_size": 10, "window_size": 8192, "whitelist_token_ids": []}
+    assert body["repetition_penalty"] == 1.05
     assert "logprobs" not in body
 
     assert client.get("/info", headers=auth).json()["model_id"] == recipe.model_id

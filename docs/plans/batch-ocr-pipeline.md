@@ -140,7 +140,8 @@ cartridges model_eval    [--revision run-<id>] [--split test] [--out eval_report
 cartridges model_parity  --revision run-<id> [--hf_call_id fc-...]
 cartridges model_promote --revision run-<id> [--max_cer 0.20] [--max_loop_rate 0.02] [--dry_run]
 cartridges model_merge   --revision prod
-cartridges serve_deploy  --revision prod [--max_containers 8]
+cartridges serve_deploy  --revision prod [--max_containers 8] [--ngram_size 10] [--repetition_penalty 1.05]
+cartridges ocr           FILE.png|FILE.pdf [--page_number 1] [--revision prod] [--dpi 250]
 cartridges serve_warm    --containers 4
 cartridges serve_cool
 cartridges serve_status
