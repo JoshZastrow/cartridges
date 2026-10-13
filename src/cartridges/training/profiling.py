@@ -99,7 +99,7 @@ class ProfileConfig(BaseModel):
     # attached unmerged to a fresh base load. "" = base model only.
     hf_revision: str = "run-liw4qzol"
     # Same clamp `_capped_generate` applies on the current eval path.
-    max_new_tokens: int = 1024
+    max_new_tokens: int = TrainConfig().max_new_tokens
     # Measure every test-split page, not just the 3 fixed ones (a corpus-level
     # CER check that a speedup didn't change transcription quality).
     all_test_pages: bool = False

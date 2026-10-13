@@ -221,8 +221,9 @@ class CudaGraphDecoder:
     """
 
     # Prompt is ~1,150 tokens max (257 global + up to 6x144 crop tokens + text)
-    # plus max_new_tokens <= 1024; one fixed size = one graph for every page.
-    MAX_CACHE_LEN = 2560
+    # plus max_new_tokens <= 2560 (TrainConfig); one fixed size = one graph for
+    # every page. KV cache at this size: 60 KiB/token x 4096 = 240 MB.
+    MAX_CACHE_LEN = 4096
 
     def __init__(self, model):
         import torch

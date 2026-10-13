@@ -189,6 +189,16 @@ def _load_base_model(config: TrainConfig):
     # `base_model` metadata -- the Hub rejects that (not a real repo id).
     # Point it at the actual Hub id this snapshot came from.
     model.config._name_or_path = config.model_id.value
+
+    # Fix A (docs/plans/inference-speed.md): transformers' DeepseekV2MoE.moe
+    # checks `num_tokens == 0` on a CUDA tensor for each of 64 experts, a
+    # blocking GPU->CPU sync per expert (~700 per forward). The patch reads
+    # the per-expert counts once per layer; same math, identical outputs.
+    # Class-level, so it covers training, eval and serving alike.
+    from cartridges.training.fast_decode import _patch_moe
+
+    with _stage("patch_moe_one_sync"):
+        logger.info("patched MoE classes: %d", _patch_moe(model))
     return model, tokenizer
 
 

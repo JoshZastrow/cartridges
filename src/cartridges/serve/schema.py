@@ -47,7 +47,7 @@ class ServeConfig(BaseModel):
 
     # See training/config.py's TrainConfig.max_new_tokens comment: infer()
     # hardcodes 8192 with no other reliable early-stop guarantee.
-    max_new_tokens: int = 1024
+    max_new_tokens: int = 2560
 
 
 class GenerateRequest(BaseModel):

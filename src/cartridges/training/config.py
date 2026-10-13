@@ -82,9 +82,11 @@ class TrainConfig(BaseModel):
     # model.infer()'s eval_mode generation caps at 8192 max_new_tokens
     # internally with no other early-stop guarantee; an undertrained/base
     # model that falls into a repetition loop can burn the full budget
-    # (minutes per example). Capped lower for fast sweep iteration; raise
-    # back to 8192 (or leave default) for a final, no-truncation-risk eval.
-    max_new_tokens: int = 1024
+    # (minutes per example). Capped to the longest labeled page instead:
+    # 2,179 tokens (There_He_Is/83, data/train/quality/pages.csv) + ~17%
+    # headroom, so no real page is truncated. Must stay <= fast_decode's
+    # CudaGraphDecoder.MAX_CACHE_LEN minus the ~1,140-token prompt.
+    max_new_tokens: int = 2560
 
     # W&B experiment tracking: `group` clusters every run from one sweep/
     # session together in the UI (https://docs.wandb.ai/models/runs/grouping);
