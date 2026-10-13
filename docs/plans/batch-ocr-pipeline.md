@@ -137,7 +137,6 @@ Thus we write the markdown tree ourselves, in the PageIndex schema. PageIndex
 
 ```
 cartridges model_eval    [--revision run-<id>] [--split test] [--out eval_report.json]
-cartridges model_parity  --revision run-<id> [--hf_call_id fc-...]
 cartridges model_promote --revision run-<id> [--max_cer 0.20] [--max_loop_rate 0.02] [--dry_run]
 cartridges model_merge   --revision prod
 cartridges serve_deploy  --revision prod [--max_containers 8] [--ngram_size 10] [--repetition_penalty 1.05]
@@ -160,37 +159,19 @@ cartridges notes_collate [--out notes_out] [--budget 1000000]
 
 ## 5. Phases
 
-### Phase 0: Numeric parity (go / no-go)
+### Phase 0: Numeric parity (go / no-go) - closed
 
-Purpose: show that vLLM gives the same results as the training eval path
-(`finetune._run_inference`: unsloth + PEFT, adapter not merged, `model.infer`).
+Purpose: show that vLLM gives the same results as the training eval path.
 
-Command: `cartridges model_parity --revision <rev>` (file `serve/parity.py`).
+Result (2026-10-13): the cause of the difference was on the HF side. In
+transformers >= 4.53 the HF Qwen2 vision encoder ran with a plain causal mask;
+vLLM runs the design mask. `training/encoder_mask.py` fixes the HF path
+(`ce92e0b`). vLLM is the production path. See `docs/hf-vllm-parity.md`.
 
-1. Deploy the revision: `serve_deploy --revision <rev>`. This also tests the merge.
-2. The command sends the test-split images (the same PNG bytes that eval uses)
-   to vLLM. At the same time, it runs `evaluate()` on Modal.
-3. The vLLM request uses the eval settings, not the production settings:
-   plain prompt `"<image>\nFree OCR. "`, `no_repeat_ngram` 35 over the full
-   output, no whitelist, `max_tokens` = `TrainConfig.max_new_tokens`.
-4. The report gives, for each example: CER against the reference for each path,
-   CER of vLLM against HF, exact match, and the first character that differs.
+The parity tools (`model_parity`, `serve/parity.py`, `scripts/parity/`) are
+removed. To get them again, use commit `56399e2`.
 
-Pass condition:
-- The mean CER of vLLM is within 1 point of the mean CER of HF.
-- The mean CER of vLLM against HF is less than 2%.
-
-Bit-for-bit equality is not expected (different kernels, merged bf16 weights).
-
-If parity fails, examine `first_diff` and the prompt. If it still fails, use
-the fallback: HF batched `generate()` with `@modal.batched`.
-
-Result (2026-10-13): parity fails, and the cause is on the HF side. In
-transformers 4.56.2 the HF Qwen2 vision encoder runs with a plain causal mask;
-vLLM runs the design mask. vLLM is the production path. See
-`docs/hf-vllm-parity.md`.
-
-Throughput (after parity passes): run `notes_process` at concurrency 8, 32,
+Throughput: run `notes_process` at concurrency 8, 32,
 and 64. Read `pages/s` in the log.
 
 ### Phase 1: Model registry and promotion
@@ -253,9 +234,9 @@ Verify: `notes_process <fixture> --dry_run` gives valid JSON.
 
 | Phase | Code | Unit tests | Live check on Modal |
 |---|---|---|---|
-| 0 Spike | n/a | n/a | Not done. Do this first. |
-| 1 Registry and promotion | Done | Done | Not done |
-| 2 Inference server | Done | Command only | Not done |
+| 0 Spike | n/a | n/a | Done (closed 2026-10-13) |
+| 1 Registry and promotion | Done | Done | Done (`prod`, `verified-*` tags) |
+| 2 Inference server | Done | Done | Done (E4 served, test CER 0.136) |
 | 3 Cache v2 | Done | Gated test (`CARTRIDGES_TEST_DATABASE_URL`) | Not done |
 | 4 Batch pipeline | Done | Done (fake backend, in-memory store) | Not done |
 | 5 Output writers | Done | Done | n/a |
@@ -274,24 +255,12 @@ Verify: `notes_process <fixture> --dry_run` gives valid JSON.
 4. Run the commands from the main checkout. `model_promote` imports the
    training app, and that app needs `data/train/hf_dataset`.
 
-## 5b. Phase 0 procedure
-
-Note: the adapter of W&B run `divine-energy-17` (`vrp2edvi`) does not exist.
-The run is older than the HF Hub repo, and it saved no model artifact. The
-only trained adapter on the Hub is `run-liw4qzol` (`dry-fire-27`).
-
-1. `cartridges serve_deploy --revision <rev>`
-2. `cartridges serve_warm --containers 1`
-3. `cartridges model_parity --revision <rev>`
-4. Read the summary. Examine `parity_report.json` for each example.
-5. `cartridges serve_cool`
-
 ## 6. Risks
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| The merged weights do not load in vLLM (key names). | Medium | The merge keeps the base key names. Phase 0 spike. |
-| vLLM output is different from `model.infer()`. | Medium | Phase 0 CER check. |
+| The merged weights do not load in vLLM (key names). | Closed | The merge keeps the base key names. Checked live. |
+| vLLM output is different from the HF eval. | Closed | Cause found and fixed (`docs/hf-vllm-parity.md`). |
 | Repetition loops make requests slow. | Medium | `max_tokens` cap, n-gram processor, flag and retry. |
 | Upload bandwidth limits throughput (large PNGs). | Medium | Default DPI 250. Measure in Phase 0. |
 | Cold start of each container (1 to 3 minutes). | Medium | Pre-warm K containers. Snapshots later. |

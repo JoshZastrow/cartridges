@@ -471,7 +471,7 @@ def _generate_one(model, tokenizer, collator, image) -> str:
 
     model.infer() is not used: its format_messages() strips the prompt, so it
     sent "<image>\nFree OCR." without the trailing space token that training
-    uses (tests/test_eval_preprocessing.py). The generate() kwargs are the
+    uses (docs/hf-vllm-parity.md, step 4). The generate() kwargs are the
     ones infer() uses in eval_mode."""
     import torch
 

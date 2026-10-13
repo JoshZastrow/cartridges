@@ -36,7 +36,7 @@ This is not a layout bug, so this investigation does not change code. See
 
 ## Evidence: hidden states at each stage boundary
 
-Script: `scripts/parity/stage_parity.py`. Both sides load the same merged
+Script: `scripts/parity/stage_parity.py` (removed; see commit `56399e2`). Both sides load the same merged
 bf16 weights (`/cache/models/a2f23f4...`, adapter run-liw4qzol). Inputs are
 the same pixels (training collator vs vLLM processor, bit-identical, see
 `docs/plans/batch-ocr-pipeline.md` 3.8). Pages 63, 52, 44 of the test split.
@@ -54,7 +54,7 @@ give the same result below.
 | Text-token embeddings in LM input | 1.0 | 0 | match |
 | Final-norm hidden state, last prompt position | 0.93-0.95 | 0.31-0.37 | differs (follows the image embeddings) |
 
-Verification (`scripts/parity/mask_verify.py`): the HF encoder, changed to
+Verification (`scripts/parity/mask_verify.py`, removed; see commit `56399e2`): the HF encoder, changed to
 give the design mask as a mask dict (as vLLM does), matches vLLM:
 
 | Pages 63, 52, 44 | Qwen2 global cos | Qwen2 tiles cos | Projector cos | rel. L2 |

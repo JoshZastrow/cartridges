@@ -170,64 +170,6 @@ class Cli:
         if not result.passed:
             raise SystemExit(2)
 
-    def model_parity(
-        self,
-        revision: str,
-        split: str = "test",
-        dataset_dir: str = "data/train/hf_dataset",
-        out: str = "parity_report.json",
-        concurrency: int = 16,
-        hf_call_id: str = "",
-    ) -> None:
-        """Cross-check: compare the deployed OCR service with the training
-        eval path (finetune.evaluate: unsloth + PEFT) on the same images.
-
-        `revision` must be the deployed revision (serve_deploy first). The HF
-        eval and the service requests run at the same time. Writes the full
-        report to `out` and prints the summary. Exit code 2 if parity fails.
-        Needs VLLM_API_KEY.
-
-        hf_call_id: the call id of an evaluate() call that is already running
-        or complete (printed in the log). The command then waits for that
-        call and does not start a new eval.
-        """
-        import asyncio
-        import json
-
-        from cartridges.serve.evaluate import transcribe_all
-        from cartridges.serve.parity import compare
-
-        record = _require_deployed(revision)
-        sha = record["model_sha"]
-        references, images = _load_split(dataset_dir, split)
-        logger.info("parity: revision=%s sha=%s split=%s n=%d", revision, sha, split, len(images))
-
-        async def run():
-            backend = _service_backend(concurrency)
-            try:
-                hf_task = asyncio.create_task(asyncio.to_thread(_run_eval, sha, split, hf_call_id))
-                served = await transcribe_all(images, backend, concurrency)
-                logger.info("parity: service done (%d/%d ok); waiting for HF eval",
-                            sum(v is not None for v in served), len(served))
-                return await hf_task, served
-            finally:
-                await backend.aclose()
-
-        predictions, served = asyncio.run(run())
-        if [p["reference"] for p in predictions] != references:
-            raise SystemExit(
-                "HF eval references differ from the local dataset; rebuild the "
-                "training image or point --dataset_dir at the same data"
-            )
-        report = compare(
-            references, [p["hypothesis"] for p in predictions], served,
-            revision=revision, model_sha=sha,
-        )
-        Path(out).write_text(json.dumps(report.model_dump(), indent=2, ensure_ascii=False) + "\n")
-        _print_json({"report": out, **report.model_dump(exclude={"examples"})})
-        if not report.passed:
-            raise SystemExit(2)
-
     def model_merge(self, revision: str = "prod", overwrite: bool = False) -> None:
         """Merge the adapter at `revision` into the base weights, on the volume."""
         from cartridges.serve.registry import resolve_revision
@@ -466,43 +408,6 @@ def _eval_served(revision: str, split: str, dataset_dir: str, concurrency: int):
         split=split, elapsed_s=elapsed, pages_per_s=len(images) / elapsed,
         **score(references, hypotheses),
     )
-
-
-def _run_eval(sha: str, split: str, call_id: str = "") -> list[dict]:
-    """Run training's evaluate() on Modal for `sha` ("base" for the base
-    model), or wait for the existing call `call_id`. Return its predictions:
-    [{reference, hypothesis, cer, ...}]."""
-    import modal
-
-    if call_id:
-        logger.info("evaluate: waiting for existing call_id=%s", call_id)
-        return _wait_for_call(modal.FunctionCall.from_id(call_id))
-
-    from cartridges.serve.registry import BASE
-    from cartridges.training.config import EvalConfig, ModelSource
-    from cartridges.training.finetune import app, evaluate
-
-    if sha == BASE:
-        config = EvalConfig(model_source=ModelSource.BASE, split=split)
-    else:
-        config = EvalConfig(model_source=ModelSource.ARTIFACT, hf_revision=sha, split=split)
-    logger.info("evaluate: model_source=%s sha=%s split=%s", config.model_source.value, sha, split)
-    # detach=True: the eval continues if this process stops; pass its
-    # call_id back in to wait for it again.
-    with app.run(detach=True):
-        return _wait_for_call(evaluate.spawn(config))
-
-
-def _wait_for_call(call) -> list[dict]:
-    # Short get() calls, not one long .remote() stream (see the note above
-    # finetune.py's local entrypoints).
-    import modal
-
-    while True:
-        try:
-            return call.get(timeout=60)[0]["predictions"]
-        except (TimeoutError, modal.exception.TimeoutError):
-            logger.info("evaluate still running: call_id=%s", call.object_id)
 
 
 def _merge(sha: str, overwrite: bool = False) -> dict:

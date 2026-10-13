@@ -5,7 +5,6 @@ import pytest
 
 from cartridges.serve.evaluate import score
 from cartridges.serve.merge import lora_merge_plan, lora_scale
-from cartridges.serve.parity import compare, first_diff
 from cartridges.serve.recipe import END_OF_SENTENCE, OcrRecipe
 from cartridges.serve.registry import check_promotion
 from cartridges.serve.vllm_server import build_app, vllm_command
@@ -85,35 +84,6 @@ def test_merge_plan_rejects_non_lora_keys_and_lone_a():
 def test_lora_scale():
     assert lora_scale({"r": 16, "lora_alpha": 16}) == 1.0
     assert lora_scale({"r": 16, "lora_alpha": 16, "use_rslora": True}) == 4.0
-
-
-# --- parity -------------------------------------------------------------------
-
-
-def test_parity_passes_when_outputs_agree():
-    refs = ["the cat sat on the mat", "hello world"]
-    report = compare(refs, ["the cat sat on the mat", "hello word"], ["the cat sat on the mat", "hello word"], revision="r", model_sha="s")
-    assert report.passed and report.exact_rate == 1.0 and report.cer_gap == 0.0
-
-
-def test_parity_fails_when_vllm_drifts_from_hf():
-    refs = ["abcdefghij"] * 2
-    report = compare(refs, ["abcdefghij"] * 2, ["abcdefghij", "abcdeXXXXX"], revision="r", model_sha="s")
-    assert not report.passed
-    assert any("cer_gap" in r for r in report.reasons)
-    assert any("mean_cer_cross" in r for r in report.reasons)
-    assert report.examples[1].first_diff == 5
-
-
-def test_parity_fails_on_a_failed_request_and_scores_only_shared_examples():
-    report = compare(["a b", "c d"], ["a b", "c d"], ["a b", None], revision="r", model_sha="s")
-    assert report.n_errors == 1 and not report.passed
-    assert report.mean_cer_hf == 0.0 and report.mean_cer_vllm == 0.0
-
-
-def test_first_diff_on_prefix():
-    assert first_diff("abc", "abc") is None
-    assert first_diff("abc", "abcd") == 3
 
 
 # --- recipe --------------------------------------------------------------------
