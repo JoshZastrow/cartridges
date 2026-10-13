@@ -68,8 +68,9 @@ def read_entries(transcript: Path) -> list[Entry]:
     return entries
 
 
-def build_timeline(out_dir: Path) -> dict:
-    """Write timeline.md and timeline_pageindex_tree.json; return a summary."""
+def timeline_entries(out_dir: Path) -> list[Entry]:
+    """All entries of all journals in `out_dir`, merged by date, each journal
+    in its page order. Also used by outputs.collate."""
     journals = [read_entries(t) for t in sorted(out_dir.glob("*/transcript.md"))]
     journals = [j for j in journals if j]
     if not journals:
@@ -78,7 +79,20 @@ def build_timeline(out_dir: Path) -> dict:
     journals.sort(key=lambda j: min((e.date for e in j if e.date != UNDATED), default="9999"))
     # heapq.merge keeps each journal's order and takes the earliest head next;
     # ties go to the earlier journal (merge is stable across its inputs).
-    entries = list(heapq.merge(*journals, key=lambda e: (e.date == UNDATED, e.date)))
+    return list(heapq.merge(*journals, key=lambda e: (e.date == UNDATED, e.date)))
+
+
+def page_labels(entry: Entry) -> list[str]:
+    """The per-page date labels of an entry, as in transcript.md."""
+    if entry.date == UNDATED:
+        return ["unknown"] * len(entry.pages)
+    first = entry.date + (" " + entry.marker if entry.marker else "")
+    return [first] + [entry.date + " (cont.)"] * (len(entry.pages) - 1)
+
+
+def build_timeline(out_dir: Path) -> dict:
+    """Write timeline.md and timeline_pageindex_tree.json; return a summary."""
+    entries = timeline_entries(out_dir)
 
     lines = ["# Journals", ""]
     root = _node("Journals", 1)
@@ -125,7 +139,7 @@ def build_timeline(out_dir: Path) -> dict:
     return {
         "timeline": str(out_dir / "timeline.md"),
         "tree": str(out_dir / "timeline_pageindex_tree.json"),
-        "journals": [j[0].journal for j in journals],
+        "journals": list(dict.fromkeys(e.journal for e in entries)),
         "entries": len(entries),
         "pages": page_index,
         "first_date": min(e.date for e in dated) if dated else None,

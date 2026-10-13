@@ -7,7 +7,7 @@ For each PDF, in <out>/<pdf_stem>/:
 - manifest.json: keys and the status of each page.
 
 For all PDFs, in <out>/:
-- teacher_context.md: all transcripts in one file (collate()).
+- teacher_context.md: all transcripts in one file, in timeline order (collate()).
 
 The functions read cache rows only. They do not call a model. Thus a second
 write gives the same bytes.
@@ -128,24 +128,24 @@ def write_document(
 
 
 def collate(out_dir: Path, budget_tokens: int = 1_000_000) -> dict:
-    """Join all <out>/*/transcript.md into <out>/teacher_context.md.
+    """Join all <out>/*/transcript.md into <out>/teacher_context.md, in
+    timeline order (batch.timeline: journals merged by date, each in page
+    order).
 
-    Each page heading gets a stable anchor [doc:p.N]. The function does not
-    cut text: if the estimate is over the budget, it still writes the file
-    and returns fits=False, so the caller can decide.
+    Each page heading gets a stable anchor [doc:p.N] and its date. The
+    function does not cut text: if the estimate is over the budget, it still
+    writes the file and returns fits=False, so the caller can decide.
     """
-    parts = []
-    doc_names = []
-    for transcript in sorted(out_dir.glob("*/transcript.md")):
-        doc_name = transcript.parent.name
-        doc_names.append(doc_name)
-        body = re.sub(
-            r"(?m)^## p\. (\d+) - ",
-            lambda m: f"## [{doc_name}:p.{m.group(1)}] ",
-            transcript.read_text(),
-        )
-        parts.append(f"# {doc_name}\n\n{body.rstrip()}\n")
-    context = "\n".join(parts)
+    from cartridges.batch.timeline import page_labels, timeline_entries
+
+    entries = timeline_entries(out_dir)
+    doc_names = list(dict.fromkeys(e.journal for e in entries))
+    sections = [
+        f"## [{e.journal}:p.{n}] date: {label}\n\n{text}"
+        for e in entries
+        for (n, text), label in zip(e.pages, page_labels(e))
+    ]
+    context = "# Journals\n\n" + "\n\n---\n".join(sections).rstrip() + "\n"
     path = out_dir / "teacher_context.md"
     path.write_text(context)
     est_tokens = len(context) // CHARS_PER_TOKEN

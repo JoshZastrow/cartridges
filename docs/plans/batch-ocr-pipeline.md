@@ -113,7 +113,8 @@ For all PDFs, in `<out>/`:
 
 | File | Content |
 |---|---|
-| `teacher_context.md` | All transcripts in one file, with `[doc:page]` anchors and a token estimate. Budget default: 1,000,000 tokens. |
+| `teacher_context.md` | All transcripts in one file, in timeline order (journals merged by date, each in page order), with `[doc:page]` anchors, page dates, and a token estimate. Budget default: 1,000,000 tokens. |
+| `timeline.md`, `timeline_pageindex_tree.json` | `notes_timeline`: all journals as one dated timeline (year > month > entry) and its PageIndex tree. |
 
 PageIndex PDF mode needs a text layer. Scanned handwriting has no text layer.
 Thus we write the markdown tree ourselves, in the PageIndex schema. PageIndex

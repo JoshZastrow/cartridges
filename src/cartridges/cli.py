@@ -309,7 +309,8 @@ class Cli:
         _print_json(build_timeline(Path(out)))
 
     def notes_collate(self, out: str = "notes_out", budget: int = 1_000_000) -> None:
-        """Join all transcripts in `out` into out/teacher_context.md. Exit code
+        """Join all transcripts in `out` into out/teacher_context.md, in
+        timeline order (see notes_timeline), one [journal:p.N] anchor per page. Exit code
         2 if the token estimate is over `budget`."""
         from cartridges.batch.outputs import collate
 
