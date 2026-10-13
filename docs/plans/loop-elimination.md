@@ -183,3 +183,24 @@ pages/s; no near-duplicate-line loops or outputs > 1.5× the label. For referenc
 adapter on vLLM at 35 / 1.0 scored 0.185 on the same split. Note: `loop_rate` only catches
 exact end-of-page repeats; with n-gram 10 a loop can mutate one word per repeat and go
 undetected (HF E2 Morning_Pages/128 ran to the cap this way), so check near-duplicate lines too.
+
+## Encoder mask fix and E4 (2026-10-13)
+The Qwen2 vision encoder ran with a plain causal mask under transformers >= 4.53 (training and
+HF eval; vLLM was right). `ce92e0b` patches it (docs/hf-vllm-parity.md). Patched HF eval, 212
+pages, decoding 10 / 1.05:
+
+| Run | Adapter | Trained with fix | Loops | Disguised / runaway | Test CER (42) | Train CER | W&B |
+|---|---|---|---|---|---|---|---|
+| E2, old eval | `run-8eqhat68` | no | 2 | 6 / 6 | 0.310 | 0.299 | tba7ky3b |
+| E2, patched eval | `run-8eqhat68` | no | 1 | 0 / 0 | 0.187 | 0.228 | 0d0lrfa6 |
+| E3 (200 steps) | `run-fk5tv38a` | no | 0 | 0 / 0 | 0.203 | 0.178 | 7pzzoi2d |
+| **E4** | **`run-mepjdkzd`** | **yes** | 2 | 0 / 0 | **0.154** | **0.135** | n1z7fsf6 |
+
+- Most HF-side looping (incl. disguised loops like Morning_Pages/128) came from the broken encoder.
+- E3 overfits: better on train pages, worse on test pages. Not deployed.
+- E4's 2 loops are short end-stutters on long train pages (CER 0.3–0.4), then EOS.
+
+**Served (vLLM), 76 test pages, two runs each:** E4 corpus CER 0.136 / 0.137, loop_rate 0, no
+disguised loops or runaways; E2 was 0.168. E4 deployed (model id `260a0000…`, sha `be9a8a71`)
+and tagged `prod` + `verified-2026-10-13-be9a8a7`. E2 keeps `verified-2026-10-13-c670c66` as
+the rollback (`serve_deploy --revision run-8eqhat68`).
