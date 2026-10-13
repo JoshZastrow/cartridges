@@ -17,6 +17,8 @@ data/
 /.opencode/skills/
 /.pi/skills/
 /outputs/
+/output/
+/wandb/
 /prime-rl/
 /environments/AGENTS.md
 /environments/*/outputs/
