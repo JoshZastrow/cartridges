@@ -454,6 +454,39 @@ def _capped_generate(model, max_new_tokens: int, decoding: DecodingConfig | None
         target.generate = original_generate
 
 
+def _generate_one(model, tokenizer, collator, image) -> str:
+    """OCR one page. The inputs come from the training collator, so eval sees
+    the same prompt and pixels as training (and as the vLLM service).
+
+    model.infer() is not used: its format_messages() strips the prompt, so it
+    sent "<image>\nFree OCR." without the trailing space token that training
+    uses (tests/test_eval_preprocessing.py). The generate() kwargs are the
+    ones infer() uses in eval_mode."""
+    import torch
+
+    from cartridges.training.collator import to_conversation
+
+    t = collator.process_single_sample(to_conversation({"image": image, "text": ""})["messages"])
+    n = t["prompt_token_count"]
+    input_ids = t["input_ids"][:n].unsqueeze(0).cuda()
+    # The model infer() runs on (the inner model on a PeftModel); _capped_generate patches this one.
+    target = model.get_base_model() if hasattr(model, "get_base_model") else model
+    with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+        output_ids = target.generate(
+            input_ids,
+            images=[(t["images_crop"].cuda(), t["images_ori"].cuda())],
+            images_seq_mask=t["images_seq_mask"][:n].unsqueeze(0).cuda(),
+            images_spatial_crop=t["images_spatial_crop"],
+            temperature=0.0,
+            eos_token_id=tokenizer.eos_token_id,
+            max_new_tokens=8192,
+            no_repeat_ngram_size=35,
+            use_cache=True,
+        )
+    text = tokenizer.decode(output_ids[0, n:])
+    return text.removesuffix(tokenizer.eos_token).strip()
+
+
 def _run_inference(
     model,
     tokenizer,
@@ -462,7 +495,7 @@ def _run_inference(
     decoding: DecodingConfig = DecodingConfig(),
     fast_decode: bool = False,
 ) -> list[dict]:
-    """Run `model.infer` over `examples`; logs per-example progress/score/errors
+    """OCR `examples` with _generate_one; logs per-example progress/score/errors
     as it goes (so a crash mid-run still leaves useful Modal logs), and returns
     [{"index", "reference", "hypothesis", "cer", "status", "elapsed_s"}, ...].
 
@@ -472,14 +505,12 @@ def _run_inference(
     ngram semantics, ~12x faster per page, but not bit-identical to HF
     generate (docs/plans/inference-speed.md).
     """
-    import tempfile
     import time
-    from pathlib import Path
 
     import jiwer
     from unsloth import FastVisionModel
 
-    from cartridges.training.collator import FREE_OCR_PROMPT
+    from cartridges.training.collator import DeepSeekOCRDataCollator
 
     n = len(examples)
     with _stage(
@@ -499,36 +530,25 @@ def _run_inference(
                 for moe in _moe_modules(model):
                     moe._batched = True
 
+        collator = DeepSeekOCRDataCollator(
+            tokenizer=tokenizer,
+            model=model,
+            image_size=config.image_size,
+            base_size=config.base_size,
+            crop_mode=config.crop_mode,
+            train_on_responses_only=config.train_on_responses_only,
+        )
         predictions = []
-        with tempfile.TemporaryDirectory() as tmpdir, _capped_generate(
-            model, config.max_new_tokens, decoding, decoder
-        ):
+        with _capped_generate(model, config.max_new_tokens, decoding, decoder):
             for i, example in enumerate(examples):
                 start = time.monotonic()
                 reference = example["text"]
-                image_path = Path(tmpdir) / f"{i}.png"
-                example["image"].save(image_path)
 
                 hypothesis = None
                 cer = None
                 status = "ok"
                 try:
-                    hypothesis = model.infer(
-                        tokenizer,
-                        prompt=FREE_OCR_PROMPT,
-                        image_file=str(image_path),
-                        output_path=tmpdir,
-                        base_size=config.base_size,
-                        image_size=config.image_size,
-                        crop_mode=config.crop_mode,
-                        save_results=False,
-                        test_compress=False,
-                        # without this, infer() only streams tokens to stdout
-                        # and returns None -- this was the root cause of the
-                        # earlier "unrelated text" baseline output: that was
-                        # streamed stdout, not the (None) return value.
-                        eval_mode=True,
-                    )
+                    hypothesis = _generate_one(model, tokenizer, collator, example["image"])
                     cer = jiwer.cer(reference, hypothesis)
                 except Exception:
                     status = "error"
