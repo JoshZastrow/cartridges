@@ -1,0 +1,18 @@
+# Looping/parity follow-up E4: identical to eos_fix_100steps.yaml (E2, run-8eqhat68),
+# trained after ce92e0b gave the vision encoder its design attention mask
+# (docs/hf-vllm-parity.md). Compare against E2 under the same patched eval.
+max_steps: 100
+learning_rate: 0.0002
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr: 0.0001
+lora_r: 16
+lora_alpha: 16
+
+save_steps: 25
+save_total_limit: 3
+
+group: eos-loop-debug
+run_name: e4-train-maskfix
+notes: "E4: E2 config (EOS fix, 100 steps) + encoder design-mask patch (ce92e0b)."
+tags: [looping, e4, eos-format, maskfix]
