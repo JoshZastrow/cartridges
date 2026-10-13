@@ -184,6 +184,11 @@ Bit-for-bit equality is not expected (different kernels, merged bf16 weights).
 If parity fails, examine `first_diff` and the prompt. If it still fails, use
 the fallback: HF batched `generate()` with `@modal.batched`.
 
+Result (2026-10-13): parity fails, and the cause is on the HF side. In
+transformers 4.56.2 the HF Qwen2 vision encoder runs with a plain causal mask;
+vLLM runs the design mask. vLLM is the production path. See
+`docs/hf-vllm-parity.md`.
+
 Throughput (after parity passes): run `notes_process` at concurrency 8, 32,
 and 64. Read `pages/s` in the log.
 
