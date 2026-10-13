@@ -109,6 +109,7 @@ uv run modal run --detach -m cartridges.training.finetune::run_finetune \
 | E0 `e0-eval-base` | base DeepSeek-OCR-2 | none (infer() defaults) | **0.240** (test 0.321) | 93 / 387 | 94.4% | [xz1yd8c3](https://wandb.ai/conle-ai/cartridges/runs/xz1yd8c3) |
 | E0 `e0-eval-ft-liw4qzol` | adapter `run-liw4qzol` | none (infer() defaults) | **0.062** (test 0.077) | 24 / 387 | 42.1% | [yrbjfidv](https://wandb.ai/conle-ai/cartridges/runs/yrbjfidv) |
 | E0b `e0b-eval-ft-liw4qzol-fast` | adapter `run-liw4qzol` | re-baseline: fast decode, 2,560 cap, 212-page eval set | **0.071** (loop set 10/107, control 5/105) | 15 / 212 | 36.6% (mean NED 0.234) | [4bvd0h3m](https://wandb.ai/conle-ai/cartridges/runs/4bvd0h3m) |
+| E1 `e1-eval-ngram10` | adapter `run-liw4qzol` | `no_repeat_ngram_size` 35 → 10 | **0.024** (loop set 4/107, control 1/105) | 5 / 212 | 35.4% (mean NED 0.224) | [qqrnb27e](https://wandb.ai/conle-ai/cartridges/runs/qqrnb27e) |
 
 E0 notes: 9 pages loop under both models, 84 only under the base model, 15 only under the
 fine-tuned one. Eval set built from these: `data/train/loop_eval/manifest.jsonl`, 108 loop
@@ -139,3 +140,9 @@ E0b notes: all 15 looping pages stopped on their own (EOS) after repeating a phr
 times; none ran to the 2,560-token cap (longest 31 s). So the model does emit EOS; the
 failure is a stutter of 3–15 repeats before it, and on some pages (e.g. test/47: 717 output vs
 2,962 reference chars) the loop replaces the rest of the page. 14 of 15 are Morning_Pages.
+
+E1 notes: 10 of E0b's 15 loops are gone, no new loops; 134/212 outputs are byte-identical to
+E0b. Per page (NED change > 0.05): 29 better, 17 worse (worst: There_He_Is 83, 93, 73, long
+pages where the 10-gram block forces a wrong word on a legitimately repeated phrase). The 5
+remaining loops repeat 1–3-token phrases ("hunger,", "no,", "- Test", "I am scared.") that a
+10-token block lets through ~3+ times, and they mutate around the block ("hungry", "Tools").
