@@ -119,3 +119,12 @@ output cap; they hold 20% of reference characters but 38% of all character error
 deletions, i.e. truncation). train/244 alone has a 46,397-character (10,880-token) reference,
 likely a labelling error (several pages in one label), and accounts for ~18% of all edits.
 Pages with references within the cap: corpus CER 32.7%.
+
+**Dataset change, 2026-10-12.** PDF pages 87 (a typed, not handwritten, 53k-px page) and
+91–93 (scribbles) were removed from `There He Is.pdf`; later pages were renumbered (old 88–90
+→ 87–89, 94–102 → 90–98) and their labels/images moved to `_removed/`. The split is now frozen
+in `configs/dataset/split.json`: the test split is identical (same 78 pages, order and text);
+train is 305 rows (old rows 26, 116, 132, 244 removed). The eval set
+(`data/train/loop_eval/manifest.jsonl`) was remapped to the new row indices: 108 loop + 106
+control (2 control pages removed). E0 result files keep the old indices
+(`data/train/hf_dataset.bak-2026-10-12`).
