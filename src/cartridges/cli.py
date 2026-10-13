@@ -299,6 +299,15 @@ class Cli:
         if not report.ok:
             raise SystemExit(2)
 
+    def notes_timeline(self, out: str = "notes_out") -> None:
+        """Merge all journals in `out` into one timeline: out/timeline.md
+        (year > month > dated entry, across journals) and its PageIndex tree,
+        out/timeline_pageindex_tree.json. Reads the transcripts that
+        notes_process wrote; no model, no database."""
+        from cartridges.batch.timeline import build_timeline
+
+        _print_json(build_timeline(Path(out)))
+
     def notes_collate(self, out: str = "notes_out", budget: int = 1_000_000) -> None:
         """Join all transcripts in `out` into out/teacher_context.md. Exit code
         2 if the token estimate is over `budget`."""

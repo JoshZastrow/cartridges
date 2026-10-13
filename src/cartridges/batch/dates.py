@@ -15,8 +15,9 @@ are written in order, so the timeline is evidence too:
   cost, so a date far outside the timeline gets its month replaced when that fits.
 - page_dates() labels every page: "2024-10-21" (dated), "2024-10-21 (cont.)"
   (carried from the last dated page), "2024-10-21 (?)" (month replaced, or the
-  chosen date still conflicts: weekday or a jump back), or "unknown" before
-  the first date.
+  chosen date still conflicts: weekday or a jump back), "2024-10-21 (est.)"
+  (a page before the first dated one: estimated from the next date), or
+  "unknown" if the document has no date at all.
 
 Rules only, no model: deterministic and free.
 """
@@ -30,6 +31,7 @@ from typing import NamedTuple
 UNKNOWN_DATE = "unknown"
 CONTINUED = " (cont.)"
 UNSURE = " (?)"
+ESTIMATED = " (est.)"
 HEAD_LINES = 4  # a page's date is in its first lines
 HEADER_MAX_CHARS = 70  # a longer line is a sentence, not a header
 DATE_MAX_OFFSET = 25  # the date starts near the start of a header line
@@ -186,6 +188,12 @@ def page_dates(texts: list[str]) -> list[str]:
             labels.append(last.isoformat() + CONTINUED)
         else:
             labels.append(UNKNOWN_DATE)
+    # Pages before the first date (title pages, an undated first entry) take
+    # the first date as an estimate, so every page has a place in the timeline.
+    first = next((label for label in labels if label != UNKNOWN_DATE), None)
+    if first is not None:
+        estimate = first[:10] + ESTIMATED
+        labels = [estimate if label == UNKNOWN_DATE else label for label in labels]
     return labels
 
 

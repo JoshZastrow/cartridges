@@ -30,7 +30,7 @@ def test_only_the_first_lines_count():
 
 def test_page_dates_carry_the_entry_date_forward():
     texts = ["# Morning Pages", "October 21st, 2024\nentry", "more of the entry", "Oct. 24, 2024\nnext"]
-    assert page_dates(texts) == ["unknown", "2024-10-21", "2024-10-21 (cont.)", "2024-10-24"]
+    assert page_dates(texts) == ["2024-10-21 (est.)", "2024-10-21", "2024-10-21 (cont.)", "2024-10-24"]
 
 
 def test_written_weekday_beats_a_misread_year():
