@@ -1,24 +1,44 @@
 """Page dates for the batch outputs, read from the OCR text.
 
 A journal entry starts with a handwritten date ("Monday, 9:55am / October
-21st, 2024"); the pages after it continue the entry without one. So:
-- written_date() looks for a date in the first few lines of a page;
-- page_dates() gives every page a header label: the written date
-  ("2024-10-21"), the last written date carried forward ("2024-10-21 (cont.)"),
-  or "unknown" before the first date.
+21st, 2024"); the pages after it continue the entry without one. The journals
+are written in order, so the timeline is evidence too:
 
-Rules only, no model: deterministic and free. A date the OCR misread passes
-through as written.
+- read_date() finds the date on a page's header line: month and day (trusted),
+  plus the year and weekday if written (evidence only: the OCR misreads years,
+  e.g. 2021 -> 2024, 2023 -> 2025).
+- resolve_years() picks one year per dated page for the whole document at
+  once (dynamic programming), favouring dates that move forward, small gaps,
+  a matching written weekday, and the written year, in that order of weight.
+- page_dates() labels every page: "2024-10-21" (dated), "2024-10-21 (cont.)"
+  (carried from the last dated page), "2024-10-21 (?)" (the chosen date still
+  conflicts: weekday or a jump back), or "unknown" before the first date.
+
+Rules only, no model: deterministic and free.
 """
 
 from __future__ import annotations
 
 import datetime
 import re
+from typing import NamedTuple
 
 UNKNOWN_DATE = "unknown"
 CONTINUED = " (cont.)"
-HEAD_LINES = 4  # a page's date is in its first lines; deeper matches are body text
+UNSURE = " (?)"
+HEAD_LINES = 4  # a page's date is in its first lines
+HEADER_MAX_CHARS = 70  # a longer line is a sentence, not a header
+DATE_MAX_OFFSET = 25  # the date starts near the start of a header line
+
+# Timeline costs (resolve_years). A written year is weak evidence (the OCR
+# misreads it); the written weekday is strong; a big jump back is very unlikely.
+COST_YEAR_NOT_AS_WRITTEN = 1.0
+COST_WEEKDAY_MISMATCH = 3.0
+COST_SMALL_STEP_BACK = 1.0  # a few weeks back: entries written out of order
+COST_BIG_STEP_BACK = 10.0
+COST_PER_YEAR_FORWARD = 1.0
+SAME_DAY_DAYS = 3
+SMALL_STEP_BACK_DAYS = 45
 
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -28,8 +48,6 @@ _MONTH = (
     r"(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
     r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?"
 )
-_WEEKDAY = re.compile(r"\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\b", re.I)
-_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _ORD = r"(?:st|nd|rd|th)?"
 _YEAR = r"(?:,?\s*(?P<year>\d{4}))?"
 _PATTERNS = [
@@ -40,58 +58,128 @@ _PATTERNS = [
     # 10/24/24, 10-24-2024 (US month first)
     re.compile(r"\b(?P<nmonth>\d{1,2})[/.-](?P<day>\d{1,2})[/.-](?P<year>\d{4}|\d{2})\b"),
 ]
+_WEEKDAY = re.compile(r"\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\b", re.I)
+_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_MARKUP = re.compile(r"^[\s#>*\-]+")
 
 
-def written_date(text: str, last: datetime.date | None = None) -> datetime.date | None:
-    """The date written in the first lines of `text`, or None. A date without
-    a year gets one from `last` (the previous written date): if a weekday is
-    written too ("Monday, June 13th"), the year within one of `last`'s where
-    that weekday matches; otherwise `last`'s year, one later if it would go
-    back in time (December -> January)."""
-    head = "\n".join(text.strip().splitlines()[:HEAD_LINES])
-    weekday = _WEEKDAY.search(head)
-    for pattern in _PATTERNS:
-        for m in pattern.finditer(head):
+class WrittenDate(NamedTuple):
+    month: int
+    day: int
+    year: int | None  # as read; may be wrong
+    weekday: int | None  # 0 = Monday, as read
+
+
+def read_date(text: str) -> WrittenDate | None:
+    """The date on the first header-like line of the page, or None. A header
+    line is short and has the date near its start ("## Sunday, March 26,
+    2023", "D: 12/5/21 //10am", "Meditation - Wednesday, Sept. 5th, 2023").
+    The weekday counts if it is on that line or on a short line just above."""
+    lines = [_MARKUP.sub("", line).strip() for line in text.strip().splitlines()[:HEAD_LINES]]
+    for i, line in enumerate(lines):
+        if not line or len(line) > HEADER_MAX_CHARS:
+            continue
+        for pattern in _PATTERNS:
+            m = pattern.search(line)
+            if m is None or m.start() > DATE_MAX_OFFSET:
+                continue
             parts = m.groupdict()
             month = int(parts["nmonth"]) if parts.get("nmonth") else _MONTHS[parts["month"][:3].lower()]
-            year = parts.get("year")
-            if year is None:
-                if last is None:
-                    continue
-                day = int(parts["day"])
-                if weekday is not None:
-                    want = _WEEKDAYS.index(weekday.group(1).lower())
-                    years = sorted(range(last.year - 1, last.year + 2), key=lambda y: abs(y - last.year))
-                    match = next((d for y in years if (d := _date(y, month, day)) and d.weekday() == want), None)
-                    if match is not None:
-                        return match
-                guess = _date(last.year, month, day)
-                if guess is not None and guess < last:
-                    guess = _date(last.year + 1, month, day)
-                if guess is not None:
-                    return guess
+            day = int(parts["day"])
+            if not (1 <= month <= 12 and 1 <= day <= 31):
                 continue
-            year = int(year) + (2000 if len(year) == 2 else 0)
-            found = _date(year, month, int(parts["day"]))
-            if found is not None and 1990 <= found.year <= 2100:
-                return found
+            year = parts.get("year")
+            year = None if year is None else int(year) + (2000 if len(year) == 2 else 0)
+            weekday = _WEEKDAY.search(line)
+            if weekday is None and i > 0 and len(lines[i - 1]) <= DATE_MAX_OFFSET:
+                weekday = _WEEKDAY.search(lines[i - 1])
+            return WrittenDate(month, day, year, _WEEKDAYS.index(weekday.group(1).lower()) if weekday else None)
     return None
+
+
+def resolve_years(found: list[WrittenDate]) -> list[tuple[datetime.date, bool] | None]:
+    """One (date, unsure) per written date, choosing years for the whole
+    sequence at once. None if no year fits (no year written anywhere, or an
+    impossible day). unsure: the chosen date's weekday or step back conflicts."""
+    written_years = [w.year for w in found if w.year is not None]
+    if not written_years:
+        return [None] * len(found)
+    years = range(min(written_years) - 1, max(written_years) + 2)
+
+    def own_cost(w: WrittenDate, d: datetime.date) -> float:
+        cost = COST_YEAR_NOT_AS_WRITTEN if w.year is not None and d.year != w.year else 0.0
+        if w.weekday is not None and d.weekday() != w.weekday:
+            cost += COST_WEEKDAY_MISMATCH
+        return cost
+
+    # best[i][d] = (cost of the best timeline ending with page i on date d, previous date)
+    best: list[dict[datetime.date, tuple[float, datetime.date | None]]] = []
+    for w in found:
+        options = [d for y in years if (d := _date(y, w.month, w.day)) is not None]
+        step: dict[datetime.date, tuple[float, datetime.date | None]] = {}
+        prev = next((b for b in reversed(best) if b), None)
+        for d in options:
+            if prev is None:
+                step[d] = (own_cost(w, d), None)
+            else:
+                step[d] = min(
+                    ((c + _step_cost(p, d) + own_cost(w, d), p) for p, (c, _) in prev.items()),
+                    key=lambda t: t[0],
+                )
+        best.append(step)
+
+    # Walk back from the cheapest end.
+    chosen: list[datetime.date | None] = [None] * len(found)
+    last = next((i for i in reversed(range(len(best))) if best[i]), None)
+    if last is None:
+        return [None] * len(found)
+    d = min(best[last], key=lambda k: best[last][k][0])
+    for i in range(last, -1, -1):
+        if not best[i]:
+            continue
+        chosen[i] = d
+        d = best[i][d][1]
+
+    out: list[tuple[datetime.date, bool] | None] = []
+    prev_date = None
+    for w, d in zip(found, chosen):
+        if d is None:
+            out.append(None)
+            continue
+        unsure = (w.weekday is not None and d.weekday() != w.weekday) or (
+            prev_date is not None and (prev_date - d).days > SMALL_STEP_BACK_DAYS
+        )
+        out.append((d, unsure))
+        prev_date = d
+    return out
 
 
 def page_dates(texts: list[str]) -> list[str]:
     """One header date label per page, in page order."""
+    found = [read_date(text) for text in texts]
+    dated = [i for i, w in enumerate(found) if w is not None]
+    resolved = dict(zip(dated, resolve_years([found[i] for i in dated])))
     labels = []
     last: datetime.date | None = None
-    for text in texts:
-        found = written_date(text, last)
-        if found is not None:
-            last = found
-            labels.append(found.isoformat())
+    for i in range(len(texts)):
+        hit = resolved.get(i)
+        if hit is not None:
+            last, unsure = hit
+            labels.append(last.isoformat() + (UNSURE if unsure else ""))
         elif last is not None:
             labels.append(last.isoformat() + CONTINUED)
         else:
             labels.append(UNKNOWN_DATE)
     return labels
+
+
+def _step_cost(prev: datetime.date, cur: datetime.date) -> float:
+    days = (cur - prev).days
+    if days >= -SAME_DAY_DAYS:
+        return COST_PER_YEAR_FORWARD * max(days, 0) / 365
+    if -days <= SMALL_STEP_BACK_DAYS:
+        return COST_SMALL_STEP_BACK
+    return COST_BIG_STEP_BACK
 
 
 def _date(year: int, month: int, day: int) -> datetime.date | None:
