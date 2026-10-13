@@ -439,8 +439,6 @@ def _capped_generate(model, max_new_tokens: int, decoding: DecodingConfig | None
     target = model.get_base_model() if hasattr(model, "get_base_model") else model
     original_generate = target.generate
     overrides = decoding.model_dump(exclude_none=True) if decoding else {}
-    if decoder is not None and "repetition_penalty" in overrides:
-        raise ValueError("fast_decode supports eos_token_id/no_repeat_ngram_size overrides, not repetition_penalty")
 
     def capped(*args, **kwargs):
         kwargs["max_new_tokens"] = min(kwargs.get("max_new_tokens", max_new_tokens), max_new_tokens)

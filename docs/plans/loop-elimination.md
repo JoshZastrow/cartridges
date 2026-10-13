@@ -76,6 +76,7 @@ plus the experiment's tag (`e0`…`e4`). Run names are `<experiment>-<job>-<chan
 |---|---|---|
 | E0 baselines | (existing adapter `run-liw4qzol`) | `e0-eval-base`, `e0-eval-ft-liw4qzol` |
 | E1 decoding | none | `e1-eval-ngram10` |
+| E1b decoding + repetition penalty | none | `e1b-eval-ngram10-rep105` |
 | E2 EOS fix | `e2-train-eos-fix` | `e2-eval-eos-fix` |
 | E3 EOS fix + 200 steps | `e3-train-eos-fix-200steps` | `e3-eval-eos-fix-200steps` |
 | E4 confirm | none | `e4-eval-<winner>-test` |

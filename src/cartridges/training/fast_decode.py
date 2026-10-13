@@ -8,7 +8,8 @@ Used by `profiling.py`; everything here plugs in underneath the model's own
 - `_moe_one_sync`: DeepseekV2MoE.moe without a host sync per expert, plus a
   sync-free single-token path over stacked expert weights (LoRA unmerged).
 - `CudaGraphDecoder`: static KV cache, the 1-token decode step replayed from a
-  CUDA graph; greedy + EOS + no-repeat-ngram semantics of infer()'s generate.
+  CUDA graph; greedy + EOS + no-repeat-ngram semantics of infer()'s generate,
+  plus HF's repetition penalty (`apply_repetition_penalty`) when asked for.
 - `RANGES`: record_function/NVTX stage labels shared with the profiler.
 
 torch/transformers are imported lazily (this module is imported locally too).
@@ -99,6 +100,17 @@ class _IncrementalNoRepeatNGram:
             scores[0, banned] = -float("inf")
         return scores
 
+
+
+def apply_repetition_penalty(logits, seen, penalty: float):
+    """HF's RepetitionPenaltyLogitsProcessor (CTRL) for one sequence: the
+    logit of every token id already in the sequence (prompt included; `seen`
+    is a [vocab] bool mask of them) is divided by `penalty` if positive and
+    multiplied by it if negative. Returns a new tensor."""
+    import torch
+
+    penalized = torch.where(logits < 0, logits * penalty, logits / penalty)
+    return torch.where(seen, penalized, logits)
 
 
 def _expert_linear(x, stacked: dict, name: str, idx):
@@ -286,7 +298,8 @@ class CudaGraphDecoder:
         self.cache.reset()
 
     def generate(self, input_ids, *, timer, state, images, images_seq_mask, images_spatial_crop,
-                 eos_token_id, max_new_tokens, no_repeat_ngram_size=0, **_ignored):
+                 eos_token_id, max_new_tokens, no_repeat_ngram_size=0, repetition_penalty=1.0,
+                 **_ignored):
         import torch
 
         if self.graph is None:
@@ -324,12 +337,18 @@ class CudaGraphDecoder:
         timer.mark()
 
         blocker = NoRepeatNGramBlocker(no_repeat_ngram_size, input_ids[0].tolist()) if no_repeat_ngram_size else None
+        seen = None
+        if repetition_penalty != 1.0:
+            seen = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
+            seen[input_ids[0]] = True
         tokens: list[int] = []
         for step in range(max_new_tokens):
             # Same labels/timing as the HF path: the n-gram check plus the
             # argmax sync are this path's "logits processors".
             RANGES.push("logits_processors")
             start = time.perf_counter()
+            if seen is not None:
+                logits = apply_repetition_penalty(logits, seen, repetition_penalty)
             if blocker is not None:
                 banned = blocker.banned()
                 if banned:
@@ -339,6 +358,8 @@ class CudaGraphDecoder:
             tokens.append(token)
             if blocker is not None:
                 blocker.append(token)
+            if seen is not None:
+                seen[token] = True
             elapsed = time.perf_counter() - start
             state.processor_s.append(elapsed)
             state.processor_times.setdefault("graph_path.no_repeat_ngram+argmax", []).append(elapsed)
