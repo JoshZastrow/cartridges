@@ -54,3 +54,15 @@ def test_build_timeline_orders_entries_across_journals(tmp_path):
     assert (year_2024["title"], year_2024["start_index"], year_2024["end_index"]) == ("2024", 2, 3)
     leaf = year_2024["nodes"][0]["nodes"][1]
     assert markdown.splitlines()[leaf["line_num"] - 1] == "#### 2024-10-21 · Later p. 1"
+
+
+def test_each_journal_keeps_its_page_order(tmp_path):
+    # p. 2 is dated a few days before p. 1 (written out of order): it stays after it.
+    write_transcript(tmp_path, "A", [(1, "2021-12-21", "x"), (2, "2021-12-05", "y"), (3, "2022-01-06", "z")])
+    write_transcript(tmp_path, "B", [(1, "2021-12-30", "w")])
+    build_timeline(tmp_path)
+    titles = [l for l in (tmp_path / "timeline.md").read_text().splitlines() if l.startswith("#### ")]
+    assert titles == [
+        "#### 2021-12-21 · A p. 1", "#### 2021-12-05 · A p. 2",
+        "#### 2021-12-30 · B p. 1", "#### 2022-01-06 · A p. 3",
+    ]

@@ -2,7 +2,9 @@
 
 Reads each <out>/<journal>/transcript.md (headers "## p. N - date: <label>",
 see batch.dates), groups pages into entries (a dated page and the "(cont.)"
-pages after it), sorts the entries by date across journals, and writes:
+pages after it), and merges the journals by date. Each journal keeps its page
+order (the journals are written in order; a date a few days off stays where
+the page is), so this interleaves journals, never reorders one. It writes:
 
 - <out>/timeline.md: "# Journals" > "## <year>" > "### <year-month>" >
   "#### <date> · <journal> p. <first>–<last>", then the entry's text. Page
@@ -11,12 +13,14 @@ pages after it), sorts the entries by date across journals, and writes:
   schema. start_index/end_index count pages in timeline order (1..N); each
   entry title names its journal and pages.
 
-Entries on the same date keep journal order (by first date) and page order.
+On equal dates, the journal with the earlier first date goes first. A month
+heading repeats if a journal steps back across a month boundary.
 Reads output files only: no model, no database.
 """
 
 from __future__ import annotations
 
+import heapq
 import json
 import re
 from dataclasses import dataclass, field
@@ -72,11 +76,9 @@ def build_timeline(out_dir: Path) -> dict:
         raise FileNotFoundError(f"no */transcript.md in {out_dir}")
     # Journal order: by first date, so same-day entries follow the journals' order.
     journals.sort(key=lambda j: min((e.date for e in j if e.date != UNDATED), default="9999"))
-    rank = {j[0].journal: i for i, j in enumerate(journals)}
-    entries = sorted(
-        (e for j in journals for e in j),
-        key=lambda e: (e.date == UNDATED, e.date, rank[e.journal], e.pages[0][0]),
-    )
+    # heapq.merge keeps each journal's order and takes the earliest head next;
+    # ties go to the earlier journal (merge is stable across its inputs).
+    entries = list(heapq.merge(*journals, key=lambda e: (e.date == UNDATED, e.date)))
 
     lines = ["# Journals", ""]
     root = _node("Journals", 1)
@@ -126,8 +128,8 @@ def build_timeline(out_dir: Path) -> dict:
         "journals": [j[0].journal for j in journals],
         "entries": len(entries),
         "pages": page_index,
-        "first_date": dated[0].date if dated else None,
-        "last_date": dated[-1].date if dated else None,
+        "first_date": min(e.date for e in dated) if dated else None,
+        "last_date": max(e.date for e in dated) if dated else None,
         "estimated_or_unsure": sum(bool(e.marker) for e in entries),
         "undated_entries": len(entries) - len(dated),
     }
