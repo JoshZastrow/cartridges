@@ -33,7 +33,7 @@ import subprocess
 import time
 
 import modal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cartridges.serve.recipe import OcrRecipe
 
@@ -105,6 +105,7 @@ def vllm_command(recipe: OcrRecipe, max_num_seqs: int) -> list[str]:
 
 class OcrRequest(BaseModel):
     image_base64: str
+    top_logprobs: int = Field(default=0, ge=0, le=20)  # parity checks only
 
 
 class OcrResponse(BaseModel):
@@ -112,6 +113,8 @@ class OcrResponse(BaseModel):
     model_id: str
     finish_reason: str | None
     completion_tokens: int | None
+    # [(token_id, logprob)] for the first output token, if top_logprobs > 0.
+    first_token_top_logprobs: list[tuple[int, float]] | None = None
 
 
 def build_app(recipe: OcrRecipe, api_key: str, vllm):
@@ -135,16 +138,25 @@ def build_app(recipe: OcrRecipe, api_key: str, vllm):
 
     @web.post("/ocr", dependencies=[Depends(check_key)])
     async def ocr(request: OcrRequest) -> OcrResponse:
-        response = await vllm.post("/v1/chat/completions", json=recipe.chat_request(request.image_base64))
+        body = recipe.chat_request(request.image_base64, request.top_logprobs)
+        response = await vllm.post("/v1/chat/completions", json=body)
         if response.status_code >= 400:
             raise HTTPException(status_code=502, detail=f"vLLM {response.status_code}: {response.text[:500]}")
         body = response.json()
         choice = body["choices"][0]
+        first_top = None
+        if request.top_logprobs and (choice.get("logprobs") or {}).get("content"):
+            # return_tokens_as_token_ids gives tokens as "token_id:<id>".
+            first_top = [
+                (int(t["token"].removeprefix("token_id:")), t["logprob"])
+                for t in choice["logprobs"]["content"][0]["top_logprobs"]
+            ]
         return OcrResponse(
             text=recipe.postprocess(choice["message"]["content"] or ""),
             model_id=recipe.model_id,
             finish_reason=choice.get("finish_reason"),
             completion_tokens=(body.get("usage") or {}).get("completion_tokens"),
+            first_token_top_logprobs=first_top,
         )
 
     return web

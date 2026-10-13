@@ -6,9 +6,9 @@ model id is the hash of the recipe. Thus:
 - the cache key, the eval report, and the deploy record use one id;
 - a change to any setting is a new model id, never a silent change.
 
-Defaults match the training eval path (finetune._run_inference with
-model.infer): the collator's preprocessing, the training prompt, greedy
-decoding with no_repeat_ngram_size 35 over the full output, and the
+Defaults match the training eval path (finetune._generate_one) with
+DecodingConfig(no_repeat_ngram_size=35, repetition_penalty=1.0): the
+collator's preprocessing, the training prompt, greedy decoding, and the
 TrainConfig.max_new_tokens cap.
 """
 
@@ -46,6 +46,9 @@ class OcrRecipe(BaseModel):
     ngram_size: int = 35
     window_size: int = 8192
     whitelist_token_ids: tuple[int, ...] = ()
+    # vLLM's built-in penalty: like HF RepetitionPenaltyLogitsProcessor, it
+    # applies to prompt and output tokens. 1.0 = off.
+    repetition_penalty: float = 1.0
 
     # Postprocessing: remove these tokens, then strip whitespace.
     strip_tokens: tuple[str, ...] = (END_OF_SENTENCE,)
@@ -57,9 +60,11 @@ class OcrRecipe(BaseModel):
     def mm_processor_kwargs(self) -> dict:
         return {"base_size": self.base_size, "image_size": self.image_size, "crop_mode": self.crop_mode}
 
-    def chat_request(self, image_base64: str) -> dict:
-        """The vLLM /v1/chat/completions body for one page."""
-        return {
+    def chat_request(self, image_base64: str, top_logprobs: int = 0) -> dict:
+        """The vLLM /v1/chat/completions body for one page. top_logprobs > 0
+        also asks for the top log-probabilities per output token (raw, before
+        the logits processors), with token ids, for parity checks."""
+        body = {
             "model": self.model_id,
             "messages": [
                 {
@@ -72,6 +77,7 @@ class OcrRecipe(BaseModel):
             ],
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
+            "repetition_penalty": self.repetition_penalty,
             "skip_special_tokens": False,
             "vllm_xargs": {
                 "ngram_size": self.ngram_size,
@@ -79,6 +85,9 @@ class OcrRecipe(BaseModel):
                 "whitelist_token_ids": list(self.whitelist_token_ids),
             },
         }
+        if top_logprobs:
+            body.update(logprobs=True, top_logprobs=top_logprobs, return_tokens_as_token_ids=True)
+        return body
 
     def postprocess(self, text: str) -> str:
         for token in self.strip_tokens:

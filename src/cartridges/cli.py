@@ -238,12 +238,18 @@ class Cli:
     # --- serving ---------------------------------------------------------------
 
     def serve_deploy(
-        self, revision: str = "prod", max_containers: int = 8, max_num_seqs: int = 32
+        self,
+        revision: str = "prod",
+        max_containers: int = 8,
+        max_num_seqs: int = 32,
+        ngram_size: int = 35,
+        repetition_penalty: float = 1.0,
     ) -> None:
         """Deploy the OCR service for `revision` ("base" for the base model).
 
         Merges the adapter first if necessary. The service runs the default
-        OcrRecipe for those weights; the model id is the recipe hash. The
+        OcrRecipe for those weights, with the given n-gram size and
+        repetition penalty; the model id is the recipe hash. The
         deploy does not start a GPU container; the first request (or
         serve_warm) does.
         """
@@ -255,7 +261,7 @@ class Cli:
         sha = resolve_revision(revision)
         if sha != BASE:
             _merge(sha)
-        recipe = OcrRecipe(model_sha=sha)
+        recipe = OcrRecipe(model_sha=sha, ngram_size=ngram_size, repetition_penalty=repetition_penalty)
         os.environ["CARTRIDGES_OCR_RECIPE"] = recipe.model_dump_json()
         os.environ["CARTRIDGES_OCR_MAX_CONTAINERS"] = str(max_containers)
         os.environ["CARTRIDGES_OCR_MAX_NUM_SEQS"] = str(max_num_seqs)

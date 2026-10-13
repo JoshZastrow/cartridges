@@ -128,8 +128,9 @@ def test_recipe_model_id_changes_with_weights_and_every_setting():
         base.model_copy(update={"prompt": "OCR."}),
         base.model_copy(update={"image_size": 1024}),
         base.model_copy(update={"ngram_size": 30}),
+        base.model_copy(update={"repetition_penalty": 1.05}),
     ]
-    assert len({base.model_id, *(v.model_id for v in variants)}) == 6
+    assert len({base.model_id, *(v.model_id for v in variants)}) == 7
 
 
 def test_recipe_prompt_is_the_training_prompt():
@@ -187,15 +188,40 @@ def test_ocr_endpoint_applies_the_recipe():
     assert response.status_code == 200
     assert response.json() == {
         "text": "page text", "model_id": recipe.model_id,
-        "finish_reason": "stop", "completion_tokens": 3,
+        "finish_reason": "stop", "completion_tokens": 3, "first_token_top_logprobs": None,
     }
     body = seen[0]
     assert body["model"] == recipe.model_id
     assert body["messages"][0]["content"][1] == {"type": "text", "text": "Free OCR. "}
     assert body["vllm_xargs"] == {"ngram_size": 35, "window_size": 8192, "whitelist_token_ids": []}
+    assert body["repetition_penalty"] == 1.0
+    assert "logprobs" not in body
 
     assert client.get("/info", headers=auth).json()["model_id"] == recipe.model_id
     assert client.get("/health").status_code == 200
+
+
+def test_ocr_endpoint_returns_first_token_logprobs_on_request():
+    from fastapi.testclient import TestClient
+
+    seen: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen.append(json.loads(request.content))
+        top = [{"token": "token_id:42", "logprob": -0.1}, {"token": "token_id:7", "logprob": -2.5}]
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "x"}, "finish_reason": "stop",
+                         "logprobs": {"content": [{"token": "token_id:42", "logprob": -0.1, "top_logprobs": top}]}}],
+            "usage": {"completion_tokens": 1},
+        })
+
+    vllm = httpx.AsyncClient(base_url="http://vllm", transport=httpx.MockTransport(handler))
+    client = TestClient(build_app(OcrRecipe(model_sha="x"), "key", vllm))
+    response = client.post("/ocr", json={"image_base64": "", "top_logprobs": 2}, headers={"Authorization": "Bearer key"})
+    assert response.json()["first_token_top_logprobs"] == [[42, -0.1], [7, -2.5]]
+    assert (seen[0]["logprobs"], seen[0]["top_logprobs"], seen[0]["return_tokens_as_token_ids"]) == (True, 2, True)
 
 
 def test_ocr_endpoint_needs_the_api_key():
