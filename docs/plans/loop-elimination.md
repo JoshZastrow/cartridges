@@ -112,6 +112,9 @@ uv run modal run --detach -m cartridges.training.finetune::run_finetune \
 | E0b `e0b-eval-ft-liw4qzol-fast` | adapter `run-liw4qzol` | re-baseline: fast decode, 2,560 cap, 212-page eval set | **0.071** (loop set 10/107, control 5/105) | 15 / 212 | 36.6% (mean NED 0.234) | [4bvd0h3m](https://wandb.ai/conle-ai/cartridges/runs/4bvd0h3m) |
 | E1 `e1-eval-ngram10` | adapter `run-liw4qzol` | `no_repeat_ngram_size` 35 → 10 | **0.024** (loop set 4/107, control 1/105) | 5 / 212 | 35.4% (mean NED 0.224) | [qqrnb27e](https://wandb.ai/conle-ai/cartridges/runs/qqrnb27e) |
 | E1b `e1b-eval-ngram10-rep105` | adapter `run-liw4qzol` | n-gram 10 + `repetition_penalty` 1.05 | **0.019** (loop set 3/107, control 1/105) | 4 / 212 | 34.2% (mean NED 0.219) | [quibo1kg](https://wandb.ai/conle-ai/cartridges/runs/quibo1kg) |
+| A `e5-eval-ft-liw4qzol-fixprompt-ng35` | adapter `run-liw4qzol` | **collator prompt** (15e1308), server decoding 35 / 1.0 | **0.066** (loop 14/107, control 0/105) | 14 / 212 | 36.7% (mean NED 0.225) | [09ebxlfv](https://wandb.ai/conle-ai/cartridges/runs/09ebxlfv) |
+| B `e5-eval-ft-liw4qzol-fixprompt-ng10-rep105` | adapter `run-liw4qzol` | collator prompt, n-gram 10 + rep 1.05 | **0.019** (loop 3/107, control 1/105) | 4 / 212 | 32.1% (mean NED 0.212) | [ili9fmb3](https://wandb.ai/conle-ai/cartridges/runs/ili9fmb3) |
+| E2 `e2-eval-eos-fix` | **adapter `run-8eqhat68`** (E2: no space before EOS) | collator prompt, n-gram 10 + rep 1.05 | **0.009** (loop 2/107, control 0/105) | 2 / 212 | **30.1%** (mean NED 0.194) | [tba7ky3b](https://wandb.ai/conle-ai/cartridges/runs/tba7ky3b) |
 
 E0 notes: 9 pages loop under both models, 84 only under the base model, 15 only under the
 fine-tuned one. Eval set built from these: `data/train/loop_eval/manifest.jsonl`, 108 loop
@@ -155,3 +158,20 @@ nearly every page. Per page vs E1 (NED change > 0.05): 40 better, 30 worse. Aggr
 on both sets (mean NED loop 0.273 → 0.265, control 0.175 → 0.171), but the worse pages show
 penalty artefacts: invented words ("crushingishness", MP 8) and a Chinese token ("创业",
 There_He_Is 87) where the right English word had already been used.
+
+**Eval prompt fix, 2026-10-13.** Runs above A were measured with `model.infer()`, whose
+`format_messages()` strips the trailing space of the training prompt `"<image>\nFree OCR. "`,
+so the model saw a prompt one token shorter than in training. From `15e1308` the eval builds
+inputs with the training collator. A, B and E2 use the fixed path; compare them only with each other.
+
+## Outcome (2026-10-13)
+- Prompt fix alone (A vs E0b, different prompts): loop_rate 0.071 → 0.066 — little change.
+- Decoding (B vs A): n-gram 10 + rep 1.05 cuts loops 14 → 4 and corpus CER 36.7% → 32.1%;
+  control pages unchanged (NED 0.172 → 0.171).
+- EOS fix (E2 vs B, same decoding): loops 4 → 2, corpus CER 32.1% → 30.1%, control NED
+  0.171 → 0.148; 0 loops on the 42 test-split pages in the set. Per page: 52 better, 33 worse
+  (NED change > 0.05). Remaining loops: Morning_Pages 62, 63.
+- **Decision:** adapter `run-8eqhat68` (E2) + decoding n-gram 10 / repetition penalty 1.05.
+  E3 (200 steps) and E4 dropped. Before production: merge E2, serve on vLLM with matching
+  decoding (check how the server's n-gram processor maps to HF's whole-sequence rule) and
+  re-run the 212 pages through the server. The HF-vs-vLLM CER gap is tracked separately.
