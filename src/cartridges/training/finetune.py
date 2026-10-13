@@ -556,14 +556,15 @@ def _run_inference(
                     }
                 )
 
-        from cartridges.training.metrics import corpus_cer
+        from cartridges.training.metrics import corpus_cer, mean_ned
 
         n_errors = sum(p["hypothesis"] is None for p in predictions)
         cer = corpus_cer([p["reference"] for p in predictions], [p["hypothesis"] for p in predictions])
+        ned = mean_ned([p["reference"] for p in predictions], [p["hypothesis"] for p in predictions])
         logger.info(
-            "inference summary: n_examples=%d n_errors=%d corpus_cer=%s n_blank_refs=%d",
+            "inference summary: n_examples=%d n_errors=%d corpus_cer=%s mean_ned=%s n_blank_refs=%d",
             n, n_errors, f"{cer['corpus_cer']:.2%}" if cer["corpus_cer"] is not None else "n/a",
-            cer["n_blank_refs"],
+            f"{ned:.3f}" if ned is not None else "n/a", cer["n_blank_refs"],
         )
     return predictions
 
@@ -756,11 +757,11 @@ def evaluate(config: EvalConfig = EvalConfig()) -> list[dict]:
                 api_run.summary["eval_cer"] = mean_cer
                 api_run.summary[f"eval_cer_{config.split}"] = mean_cer
                 api_run.summary["eval_n"] = len(scored)
-                from cartridges.training.metrics import corpus_cer
+                from cartridges.training.metrics import corpus_cer, mean_ned
 
-                api_run.summary["eval_corpus_cer"] = corpus_cer(
-                    [p["reference"] for p in predictions], [p["hypothesis"] for p in predictions]
-                )["corpus_cer"]
+                refs, hyps = [p["reference"] for p in predictions], [p["hypothesis"] for p in predictions]
+                api_run.summary["eval_corpus_cer"] = corpus_cer(refs, hyps)["corpus_cer"]
+                api_run.summary["eval_mean_ned"] = mean_ned(refs, hyps)
                 api_run.summary.update()
 
     return [
@@ -859,7 +860,7 @@ def loop_eval(
     import json
 
     from cartridges.training.loops import ends_in_loop, loop_rate
-    from cartridges.training.metrics import corpus_cer
+    from cartridges.training.metrics import corpus_cer, mean_ned
 
     # Init before inference so the run shows as "running" in the group while
     # the shards work, instead of appearing only once everything is done.
@@ -891,6 +892,7 @@ def loop_eval(
         "n_pages": len(scored),
         "n_errors": len(predictions) - len(scored),
         "corpus_cer": cer["corpus_cer"],
+        "mean_ned": mean_ned([p["reference"] for p in predictions], [p["hypothesis"] for p in predictions]),
         "n_blank_refs": cer["n_blank_refs"],
         "shard_gpus": sorted({p["gpu"] for p in predictions}),
     }

@@ -1,6 +1,6 @@
 import pytest
 
-from cartridges.training.metrics import corpus_cer
+from cartridges.training.metrics import corpus_cer, mean_ned
 
 
 def test_corpus_cer_sums_edits_over_total_reference_characters():
@@ -32,3 +32,13 @@ def test_failed_inferences_are_excluded():
 
 def test_nothing_to_score():
     assert corpus_cer([""], ["x"]) == {"corpus_cer": None, "n_scored": 0, "n_blank_refs": 1}
+
+
+def test_mean_ned_averages_edits_over_the_longer_string():
+    # "abc"->"abd": 1/3. "ab"->"abababab" (runaway): 6/8, not 6/2 as CER would give.
+    assert mean_ned(["abc", "ab"], ["abd", "abababab"]) == pytest.approx((1 / 3 + 6 / 8) / 2)
+
+
+def test_mean_ned_skips_blank_references_and_failures():
+    assert mean_ned(["", "abc", "abc"], ["x", None, "abc"]) == 0.0
+    assert mean_ned([""], ["x"]) is None
