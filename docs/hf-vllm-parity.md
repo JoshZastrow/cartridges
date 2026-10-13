@@ -122,14 +122,25 @@ The same recipe on the 212-page loop set, two runs: 5 vs 3 loops, corpus CER
 operations, so greedy output is not exactly repeatable. Run each served
 config two times before you call a winner.
 
-## Recommendation (not done here)
+## Fix (2026-10-13)
 
-1. Make training use the design encoder mask: give the mask as a dict in the
-   Qwen2 encoder forward (the change in `scripts/parity/mask_verify.py`), or
-   pin a transformers version that calls `_update_causal_mask`. Then
-   training, HF eval and serving use the same encoder. Retrain and compare
-   with E2 on the vLLM service.
-2. Until then, use HF evals only to compare runs with each other. They do
-   not predict served quality.
-3. Run the stage-boundary check again if the model or the transformers
-   version changes.
+`src/cartridges/training/encoder_mask.py` `patch_encoder_mask()` replaces the
+forward of the encoder class at load time. It makes the mask with the model's
+own `_update_causal_mask` and gives it as `{"full_attention": mask}`, as vLLM
+does. `finetune._load_base_model` applies it after the MoE patch, so training,
+the HF eval and the loop eval all use it.
+
+- `tests/test_encoder_mask.py` (Modal): before the patch, the layer-0 mask is
+  not the design mask; after the patch, it is the design mask exactly.
+- Through the real loader (unsloth, autocast bf16) on the merged run-liw4qzol
+  weights, the Qwen2 encoder output now matches vLLM: cosine 0.997-0.9998
+  (was 0.70-0.85).
+
+Consequences:
+1. Training and HF-eval numbers before this fix and after this fix are not
+   comparable. Re-run baselines before you compare.
+2. Adapters trained before the fix (E2, run-liw4qzol) were trained against the
+   causal-mask encoder. Retrain with the fix and compare with E2 on the vLLM
+   service, two runs for each config.
+3. Run `tests/test_encoder_mask.py` again when the transformers version
+   changes. If the unpatched mask becomes the design mask, remove the patch.

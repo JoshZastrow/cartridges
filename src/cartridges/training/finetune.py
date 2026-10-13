@@ -199,6 +199,15 @@ def _load_base_model(config: TrainConfig):
 
     with _stage("patch_moe_one_sync"):
         logger.info("patched MoE classes: %d", _patch_moe(model))
+
+    # The vision encoder's design mask (image tokens non-causal, query tokens
+    # causal) is dead code in transformers >= 4.53; without this patch the
+    # encoder runs a plain causal mask and differs from vLLM
+    # (docs/hf-vllm-parity.md). Changes training and HF eval numerics.
+    from cartridges.training.encoder_mask import patch_encoder_mask
+
+    with _stage("patch_encoder_mask"):
+        logger.info("patched encoder classes: %d", patch_encoder_mask(model))
     return model, tokenizer
 
 
