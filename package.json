@@ -1,0 +1,20 @@
+{
+  "name": "cartridges",
+  "version": "1.0.0",
+  "description": "The `prepare-data` command runs a Prefect flow by default:",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "mongodb-memory-server": "^11.3.0"
+  }
+}

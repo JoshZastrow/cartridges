@@ -241,6 +241,24 @@ class Cli:
         _serve_function().update_autoscaler(min_containers=0)
         _print_json({"min_containers": 0})
 
+    def gateway_serve(self, port: int = 8008, host: str = "127.0.0.1") -> None:
+        """Run the OpenAI-compatible chat gateway for LibreChat (serve/gateway.py).
+        Bearer key from GATEWAY_API_KEY (default cartridges-local). Backend calls
+        go to the deployed Modal Teacher and CartridgeServer."""
+        import os
+
+        import uvicorn
+
+        from cartridges.serve import backends
+        from cartridges.serve.gateway import DEFAULT_API_KEY, build_app
+
+        web = build_app(
+            backends.teacher_generate,
+            backends.cartridge_generate,
+            api_key=os.environ.get("GATEWAY_API_KEY", DEFAULT_API_KEY),
+        )
+        uvicorn.run(web, host=host, port=port)
+
     # --- batch notes pipeline --------------------------------------------------
 
     def notes_process(

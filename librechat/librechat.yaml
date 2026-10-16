@@ -1,0 +1,24 @@
+version: 1.3.17
+cache: true
+
+interface:
+  modelSelect: true
+
+endpoints:
+  custom:
+    - name: "Journal"
+      apiKey: "cartridges-local"
+      baseURL: "http://127.0.0.1:8008/v1"
+      models:
+        default:
+          - "journal-teacher-27b"
+          - "journal-teacher-4b"
+          - "qwen3.5-4b-base"
+          - "journal-cartridge-4b-smoke"
+          - "mock-echo"
+        fetch: true
+      titleConvo: false
+      summarize: false
+      forcePrompt: false
+      dropParams: ["frequency_penalty", "presence_penalty", "user"]
+      modelDisplayLabel: "Journal"
