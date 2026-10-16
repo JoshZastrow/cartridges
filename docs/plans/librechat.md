@@ -126,6 +126,12 @@ OpenAI-compatible:
 | Gateway | http://127.0.0.1:8008/v1, key `cartridges-local` |
 | MongoDB | mongodb://127.0.0.1:27017/LibreChat |
 
+## Lifecycle
+
+`make chat-up` (gateway + Mongo + LibreChat), `make chat-test [MODEL=...]`,
+`make chat-status`, `make chat-down` (also stops idle Modal GPU containers),
+`make chat-clean` (chat-down + delete Mongo data, logs, Playwright output).
+
 ## Done when
 
 1. `npx playwright test` starts the gateway and LibreChat itself (Playwright
