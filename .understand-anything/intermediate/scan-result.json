@@ -1,0 +1,1617 @@
+{
+  "name": "cartridges",
+  "description": "Training and serving platform for journal cartridges: OCR fine-tuning of handwritten journals, a Task Store of questions, a vLLM Teacher on Modal that labels them, distillation of the Teacher into a trainable KV-cache cartridge, and a LibreChat gateway that serves Teacher or cartridge. Note: this project has over 100 source files; consider scoping analysis to a subdirectory for faster results.",
+  "languages": [
+    "config",
+    "html",
+    "javascript",
+    "json",
+    "makefile",
+    "markdown",
+    "python",
+    "shell",
+    "toml",
+    "typescript",
+    "unknown",
+    "yaml"
+  ],
+  "frameworks": [
+    "FastAPI",
+    "Pydantic",
+    "Uvicorn",
+    "Pytest",
+    "Prefect",
+    "Modal",
+    "Playwright",
+    "Marimo",
+    "PyTorch",
+    "Transformers",
+    "Weights & Biases",
+    "Weave",
+    "GitHub Actions"
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/playwright.yml",
+      "language": "yaml",
+      "sizeLines": 27,
+      "fileCategory": "infra"
+    },
+    {
+      "path": ".python-version",
+      "language": "unknown",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "configs/dataset/split.json",
+      "language": "json",
+      "sizeLines": 385,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/eval/gpt-oss.toml",
+      "language": "toml",
+      "sizeLines": 24,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/eval/llama-3.toml",
+      "language": "toml",
+      "sizeLines": 24,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/eval/nemotron-3.toml",
+      "language": "toml",
+      "sizeLines": 24,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/eval/qwen-3-5-moe.toml",
+      "language": "toml",
+      "sizeLines": 25,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/eval/qwen-3-5.toml",
+      "language": "toml",
+      "sizeLines": 26,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/finetune/eos_fix_100steps.yaml",
+      "language": "yaml",
+      "sizeLines": 18,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/finetune/eos_fix_200steps.yaml",
+      "language": "yaml",
+      "sizeLines": 18,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/finetune/example.yaml",
+      "language": "yaml",
+      "sizeLines": 16,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/finetune/lr_decay_100steps.yaml",
+      "language": "yaml",
+      "sizeLines": 16,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/finetune/maskfix_100steps.yaml",
+      "language": "yaml",
+      "sizeLines": 18,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/gepa/gpt-oss.toml",
+      "language": "toml",
+      "sizeLines": 33,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/gepa/llama-3.toml",
+      "language": "toml",
+      "sizeLines": 32,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/gepa/nemotron-3.toml",
+      "language": "toml",
+      "sizeLines": 32,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/gepa/qwen-3-5-moe.toml",
+      "language": "toml",
+      "sizeLines": 34,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/gepa/qwen-3-5.toml",
+      "language": "toml",
+      "sizeLines": 36,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/rl/gpt-oss.toml",
+      "language": "toml",
+      "sizeLines": 39,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/rl/llama.toml",
+      "language": "toml",
+      "sizeLines": 39,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/rl/nemotron.toml",
+      "language": "toml",
+      "sizeLines": 40,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/rl/qwen-moe.toml",
+      "language": "toml",
+      "sizeLines": 42,
+      "fileCategory": "config"
+    },
+    {
+      "path": "configs/rl/qwen.toml",
+      "language": "toml",
+      "sizeLines": 42,
+      "fileCategory": "config"
+    },
+    {
+      "path": "docs/cartridge-report.md",
+      "language": "markdown",
+      "sizeLines": 74,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/data-quality-2026-10-12.md",
+      "language": "markdown",
+      "sizeLines": 26,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/hf-vllm-parity.md",
+      "language": "markdown",
+      "sizeLines": 146,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/batch-ocr-pipeline.md",
+      "language": "markdown",
+      "sizeLines": 274,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/cartridge-pipeline.md",
+      "language": "markdown",
+      "sizeLines": 124,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/diagrams/label-queue.html",
+      "language": "html",
+      "sizeLines": 212,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/plans/inference-speed.md",
+      "language": "markdown",
+      "sizeLines": 152,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/label-queue.md",
+      "language": "markdown",
+      "sizeLines": 205,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/librechat.md",
+      "language": "markdown",
+      "sizeLines": 146,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/loop-elimination.md",
+      "language": "markdown",
+      "sizeLines": 206,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/profiling.md",
+      "language": "markdown",
+      "sizeLines": 148,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/plans/task-db.md",
+      "language": "markdown",
+      "sizeLines": 316,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/build_report.py",
+      "language": "python",
+      "sizeLines": 103,
+      "fileCategory": "code"
+    },
+    {
+      "path": "docs/report/diagrams/architecture.html",
+      "language": "html",
+      "sizeLines": 248,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/report/diagrams/lineage.html",
+      "language": "html",
+      "sizeLines": 249,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/report/diagrams/ml-system.html",
+      "language": "html",
+      "sizeLines": 153,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/report/diagrams/training-recipe.html",
+      "language": "html",
+      "sizeLines": 151,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/report/figures/cartridge-drift.html",
+      "language": "html",
+      "sizeLines": 289,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/report/recipe.md",
+      "language": "markdown",
+      "sizeLines": 128,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/report.html",
+      "language": "html",
+      "sizeLines": 2884,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "docs/report/sections/cartridge.md",
+      "language": "markdown",
+      "sizeLines": 209,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/sections/datagen.md",
+      "language": "markdown",
+      "sizeLines": 143,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/sections/eval.md",
+      "language": "markdown",
+      "sizeLines": 252,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/sections/monitoring.md",
+      "language": "markdown",
+      "sizeLines": 150,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/sections/teacher.md",
+      "language": "markdown",
+      "sizeLines": 177,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/sections/trainer.md",
+      "language": "markdown",
+      "sizeLines": 252,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "docs/report/summary.md",
+      "language": "markdown",
+      "sizeLines": 227,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "e2e/fixtures/tasks.json",
+      "language": "json",
+      "sizeLines": 21,
+      "fileCategory": "config"
+    },
+    {
+      "path": "e2e/librechat.spec.ts",
+      "language": "typescript",
+      "sizeLines": 102,
+      "fileCategory": "code"
+    },
+    {
+      "path": "environments/docs_to_markdown/docs_to_markdown/__init__.py",
+      "language": "python",
+      "sizeLines": 3,
+      "fileCategory": "code"
+    },
+    {
+      "path": "environments/docs_to_markdown/docs_to_markdown/taskset.py",
+      "language": "python",
+      "sizeLines": 83,
+      "fileCategory": "code"
+    },
+    {
+      "path": "environments/docs_to_markdown/pyproject.toml",
+      "language": "toml",
+      "sizeLines": 27,
+      "fileCategory": "config"
+    },
+    {
+      "path": "environments/docs_to_markdown/README.md",
+      "language": "markdown",
+      "sizeLines": 53,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "librechat/.env.example",
+      "language": "config",
+      "sizeLines": 38,
+      "fileCategory": "config"
+    },
+    {
+      "path": "librechat/librechat.yaml",
+      "language": "yaml",
+      "sizeLines": 24,
+      "fileCategory": "config"
+    },
+    {
+      "path": "librechat/mongo.js",
+      "language": "javascript",
+      "sizeLines": 25,
+      "fileCategory": "code"
+    },
+    {
+      "path": "librechat/start.sh",
+      "language": "shell",
+      "sizeLines": 77,
+      "fileCategory": "script"
+    },
+    {
+      "path": "librechat/stop.sh",
+      "language": "shell",
+      "sizeLines": 33,
+      "fileCategory": "script"
+    },
+    {
+      "path": "Makefile",
+      "language": "makefile",
+      "sizeLines": 30,
+      "fileCategory": "infra"
+    },
+    {
+      "path": "neon.ts",
+      "language": "typescript",
+      "sizeLines": 5,
+      "fileCategory": "code"
+    },
+    {
+      "path": "notebooks/001_build_ocr_dataset.py",
+      "language": "python",
+      "sizeLines": 101,
+      "fileCategory": "code"
+    },
+    {
+      "path": "notebooks/002_finetune_ocr_model.py",
+      "language": "python",
+      "sizeLines": 418,
+      "fileCategory": "code"
+    },
+    {
+      "path": "package.json",
+      "language": "json",
+      "sizeLines": 20,
+      "fileCategory": "config"
+    },
+    {
+      "path": "playwright.config.ts",
+      "language": "typescript",
+      "sizeLines": 40,
+      "fileCategory": "code"
+    },
+    {
+      "path": "pyproject.toml",
+      "language": "toml",
+      "sizeLines": 48,
+      "fileCategory": "config"
+    },
+    {
+      "path": "README.md",
+      "language": "markdown",
+      "sizeLines": 24,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "scripts/cartridge_drift.html",
+      "language": "html",
+      "sizeLines": 289,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "scripts/cartridge_drift.py",
+      "language": "python",
+      "sizeLines": 192,
+      "fileCategory": "code"
+    },
+    {
+      "path": "skills-lock.json",
+      "language": "json",
+      "sizeLines": 17,
+      "fileCategory": "config"
+    },
+    {
+      "path": "src/cartridges/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/backends.py",
+      "language": "python",
+      "sizeLines": 65,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/dates.py",
+      "language": "python",
+      "sizeLines": 237,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/keys.py",
+      "language": "python",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/outputs.py",
+      "language": "python",
+      "sizeLines": 159,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/pipeline.py",
+      "language": "python",
+      "sizeLines": 297,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/batch/timeline.py",
+      "language": "python",
+      "sizeLines": 170,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/ask.py",
+      "language": "python",
+      "sizeLines": 107,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/cache.py",
+      "language": "python",
+      "sizeLines": 318,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/chunks.py",
+      "language": "python",
+      "sizeLines": 151,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/data.py",
+      "language": "python",
+      "sizeLines": 276,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/evals.py",
+      "language": "python",
+      "sizeLines": 548,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/grpo.py",
+      "language": "python",
+      "sizeLines": 326,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/selfstudy.py",
+      "language": "python",
+      "sizeLines": 153,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/serve_cartridge.py",
+      "language": "python",
+      "sizeLines": 124,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/cgc.py",
+      "language": "python",
+      "sizeLines": 474,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/chats.py",
+      "language": "python",
+      "sizeLines": 247,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/export.py",
+      "language": "python",
+      "sizeLines": 34,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/judge.py",
+      "language": "python",
+      "sizeLines": 321,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/ksweep.py",
+      "language": "python",
+      "sizeLines": 84,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/label.py",
+      "language": "python",
+      "sizeLines": 615,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/neighbors.py",
+      "language": "python",
+      "sizeLines": 202,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/pairs.py",
+      "language": "python",
+      "sizeLines": 268,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/psych.py",
+      "language": "python",
+      "sizeLines": 53,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/qa.py",
+      "language": "python",
+      "sizeLines": 72,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/qgen.py",
+      "language": "python",
+      "sizeLines": 113,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/rubrics/judge-v0.1.md",
+      "language": "markdown",
+      "sizeLines": 23,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/rubrics/judge-v0.md",
+      "language": "markdown",
+      "sizeLines": 21,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/sampler.py",
+      "language": "python",
+      "sizeLines": 128,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/seed.py",
+      "language": "python",
+      "sizeLines": 160,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/store.py",
+      "language": "python",
+      "sizeLines": 493,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/synthesize.py",
+      "language": "python",
+      "sizeLines": 312,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/targets.py",
+      "language": "python",
+      "sizeLines": 141,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/taxonomy.py",
+      "language": "python",
+      "sizeLines": 101,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/types.py",
+      "language": "python",
+      "sizeLines": 230,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tasks/validate.py",
+      "language": "python",
+      "sizeLines": 127,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/teacher.py",
+      "language": "python",
+      "sizeLines": 864,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/tracking.py",
+      "language": "python",
+      "sizeLines": 785,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cartridge/train_distill.py",
+      "language": "python",
+      "sizeLines": 1191,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/cli.py",
+      "language": "python",
+      "sizeLines": 1646,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/__init__.py",
+      "language": "python",
+      "sizeLines": 3,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/agent/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/agent/pipeline.py",
+      "language": "python",
+      "sizeLines": 43,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/agent/tools.py",
+      "language": "python",
+      "sizeLines": 128,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/flows.py",
+      "language": "python",
+      "sizeLines": 210,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/loaders.py",
+      "language": "python",
+      "sizeLines": 144,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/qa_dataset.py",
+      "language": "python",
+      "sizeLines": 37,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/datagen/qa.py",
+      "language": "python",
+      "sizeLines": 147,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/logging/__init__.py",
+      "language": "python",
+      "sizeLines": 5,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/logging/config.py",
+      "language": "python",
+      "sizeLines": 10,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/processors/__init__.py",
+      "language": "python",
+      "sizeLines": 29,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/processors/extraction.py",
+      "language": "python",
+      "sizeLines": 73,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/processors/ocr.py",
+      "language": "python",
+      "sizeLines": 426,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/__init__.py",
+      "language": "python",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/backends.py",
+      "language": "python",
+      "sizeLines": 97,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/chat_models.py",
+      "language": "python",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/evaluate.py",
+      "language": "python",
+      "sizeLines": 98,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/gateway.py",
+      "language": "python",
+      "sizeLines": 204,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/inference.py",
+      "language": "python",
+      "sizeLines": 165,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/merge.py",
+      "language": "python",
+      "sizeLines": 156,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/recipe.py",
+      "language": "python",
+      "sizeLines": 95,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/registry.py",
+      "language": "python",
+      "sizeLines": 100,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/schema.py",
+      "language": "python",
+      "sizeLines": 64,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/serve/vllm_server.py",
+      "language": "python",
+      "sizeLines": 210,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/storage/__init__.py",
+      "language": "python",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/storage/cache.py",
+      "language": "python",
+      "sizeLines": 202,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/__init__.py",
+      "language": "python",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/collator.py",
+      "language": "python",
+      "sizeLines": 315,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/config.py",
+      "language": "python",
+      "sizeLines": 144,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/dataset.py",
+      "language": "python",
+      "sizeLines": 161,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/encoder_mask.py",
+      "language": "python",
+      "sizeLines": 77,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/fast_decode.py",
+      "language": "python",
+      "sizeLines": 377,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/finetune.py",
+      "language": "python",
+      "sizeLines": 1244,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/loops.py",
+      "language": "python",
+      "sizeLines": 57,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/metrics.py",
+      "language": "python",
+      "sizeLines": 40,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/perf_metrics.py",
+      "language": "python",
+      "sizeLines": 315,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/profile_page_report.py",
+      "language": "python",
+      "sizeLines": 214,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/profiling_report.py",
+      "language": "python",
+      "sizeLines": 41,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/profiling_train.py",
+      "language": "python",
+      "sizeLines": 235,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/profiling.py",
+      "language": "python",
+      "sizeLines": 892,
+      "fileCategory": "code"
+    },
+    {
+      "path": "src/cartridges/training/review.py",
+      "language": "python",
+      "sizeLines": 278,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/cartridge_cache_modal.py",
+      "language": "python",
+      "sizeLines": 154,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/encoder_mask_modal.py",
+      "language": "python",
+      "sizeLines": 57,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_backends.py",
+      "language": "python",
+      "sizeLines": 135,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_batch_pipeline.py",
+      "language": "python",
+      "sizeLines": 230,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_ask.py",
+      "language": "python",
+      "sizeLines": 28,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_cache.py",
+      "language": "python",
+      "sizeLines": 187,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_chunks.py",
+      "language": "python",
+      "sizeLines": 111,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_evals.py",
+      "language": "python",
+      "sizeLines": 230,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_grpo.py",
+      "language": "python",
+      "sizeLines": 125,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_cgc.py",
+      "language": "python",
+      "sizeLines": 246,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_chats.py",
+      "language": "python",
+      "sizeLines": 142,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_cli.py",
+      "language": "python",
+      "sizeLines": 481,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_export.py",
+      "language": "python",
+      "sizeLines": 26,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_judge.py",
+      "language": "python",
+      "sizeLines": 200,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_ksweep.py",
+      "language": "python",
+      "sizeLines": 63,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_label.py",
+      "language": "python",
+      "sizeLines": 688,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_neighbors.py",
+      "language": "python",
+      "sizeLines": 91,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_pairs.py",
+      "language": "python",
+      "sizeLines": 280,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_psych.py",
+      "language": "python",
+      "sizeLines": 47,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_qa.py",
+      "language": "python",
+      "sizeLines": 68,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_qgen.py",
+      "language": "python",
+      "sizeLines": 105,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_sampler.py",
+      "language": "python",
+      "sizeLines": 101,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_seed.py",
+      "language": "python",
+      "sizeLines": 93,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_store.py",
+      "language": "python",
+      "sizeLines": 147,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_synthesize.py",
+      "language": "python",
+      "sizeLines": 168,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tasks_validate.py",
+      "language": "python",
+      "sizeLines": 93,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_teacher.py",
+      "language": "python",
+      "sizeLines": 442,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_tracking.py",
+      "language": "python",
+      "sizeLines": 314,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_cartridge_train.py",
+      "language": "python",
+      "sizeLines": 630,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_dataset_split.py",
+      "language": "python",
+      "sizeLines": 29,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_encoder_mask.py",
+      "language": "python",
+      "sizeLines": 46,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_fast_decode.py",
+      "language": "python",
+      "sizeLines": 25,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_gateway.py",
+      "language": "python",
+      "sizeLines": 136,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_journal_pipeline.py",
+      "language": "python",
+      "sizeLines": 30,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_loops.py",
+      "language": "python",
+      "sizeLines": 53,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_metrics.py",
+      "language": "python",
+      "sizeLines": 44,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_page_dates.py",
+      "language": "python",
+      "sizeLines": 92,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_page_store_postgres.py",
+      "language": "python",
+      "sizeLines": 44,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_perf_metrics.py",
+      "language": "python",
+      "sizeLines": 154,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_profile_page_report.py",
+      "language": "python",
+      "sizeLines": 38,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_profiling_train.py",
+      "language": "python",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_qa.py",
+      "language": "python",
+      "sizeLines": 78,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_review.py",
+      "language": "python",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_serve_registry.py",
+      "language": "python",
+      "sizeLines": 202,
+      "fileCategory": "code"
+    },
+    {
+      "path": "tests/test_timeline.py",
+      "language": "python",
+      "sizeLines": 68,
+      "fileCategory": "code"
+    }
+  ],
+  "totalFiles": 201,
+  "filteredByIgnore": 6,
+  "estimatedComplexity": "large",
+  "importMap": {
+    ".github/workflows/playwright.yml": [],
+    ".python-version": [],
+    "configs/dataset/split.json": [],
+    "configs/eval/gpt-oss.toml": [],
+    "configs/eval/llama-3.toml": [],
+    "configs/eval/nemotron-3.toml": [],
+    "configs/eval/qwen-3-5-moe.toml": [],
+    "configs/eval/qwen-3-5.toml": [],
+    "configs/finetune/eos_fix_100steps.yaml": [],
+    "configs/finetune/eos_fix_200steps.yaml": [],
+    "configs/finetune/example.yaml": [],
+    "configs/finetune/lr_decay_100steps.yaml": [],
+    "configs/finetune/maskfix_100steps.yaml": [],
+    "configs/gepa/gpt-oss.toml": [],
+    "configs/gepa/llama-3.toml": [],
+    "configs/gepa/nemotron-3.toml": [],
+    "configs/gepa/qwen-3-5-moe.toml": [],
+    "configs/gepa/qwen-3-5.toml": [],
+    "configs/rl/gpt-oss.toml": [],
+    "configs/rl/llama.toml": [],
+    "configs/rl/nemotron.toml": [],
+    "configs/rl/qwen-moe.toml": [],
+    "configs/rl/qwen.toml": [],
+    "docs/cartridge-report.md": [],
+    "docs/data-quality-2026-10-12.md": [],
+    "docs/hf-vllm-parity.md": [],
+    "docs/plans/batch-ocr-pipeline.md": [],
+    "docs/plans/cartridge-pipeline.md": [],
+    "docs/plans/diagrams/label-queue.html": [],
+    "docs/plans/inference-speed.md": [],
+    "docs/plans/label-queue.md": [],
+    "docs/plans/librechat.md": [],
+    "docs/plans/loop-elimination.md": [],
+    "docs/plans/profiling.md": [],
+    "docs/plans/task-db.md": [],
+    "docs/report/build_report.py": [],
+    "docs/report/diagrams/architecture.html": [],
+    "docs/report/diagrams/lineage.html": [],
+    "docs/report/diagrams/ml-system.html": [],
+    "docs/report/diagrams/training-recipe.html": [],
+    "docs/report/figures/cartridge-drift.html": [],
+    "docs/report/recipe.md": [],
+    "docs/report/report.html": [],
+    "docs/report/sections/cartridge.md": [],
+    "docs/report/sections/datagen.md": [],
+    "docs/report/sections/eval.md": [],
+    "docs/report/sections/monitoring.md": [],
+    "docs/report/sections/teacher.md": [],
+    "docs/report/sections/trainer.md": [],
+    "docs/report/summary.md": [],
+    "e2e/fixtures/tasks.json": [],
+    "e2e/librechat.spec.ts": [
+      "e2e/fixtures/tasks.json"
+    ],
+    "environments/docs_to_markdown/docs_to_markdown/__init__.py": [
+      "environments/docs_to_markdown/docs_to_markdown/taskset.py"
+    ],
+    "environments/docs_to_markdown/docs_to_markdown/taskset.py": [],
+    "environments/docs_to_markdown/pyproject.toml": [],
+    "environments/docs_to_markdown/README.md": [],
+    "librechat/.env.example": [],
+    "librechat/librechat.yaml": [],
+    "librechat/mongo.js": [],
+    "librechat/start.sh": [],
+    "librechat/stop.sh": [],
+    "Makefile": [],
+    "neon.ts": [],
+    "notebooks/001_build_ocr_dataset.py": [],
+    "notebooks/002_finetune_ocr_model.py": [],
+    "package.json": [],
+    "playwright.config.ts": [],
+    "pyproject.toml": [],
+    "README.md": [],
+    "scripts/cartridge_drift.html": [],
+    "scripts/cartridge_drift.py": [],
+    "skills-lock.json": [],
+    "src/cartridges/__init__.py": [],
+    "src/cartridges/batch/__init__.py": [],
+    "src/cartridges/batch/backends.py": [],
+    "src/cartridges/batch/dates.py": [],
+    "src/cartridges/batch/keys.py": [],
+    "src/cartridges/batch/outputs.py": [
+      "src/cartridges/batch/dates.py",
+      "src/cartridges/datagen/loaders.py",
+      "src/cartridges/storage/cache.py"
+    ],
+    "src/cartridges/batch/pipeline.py": [
+      "src/cartridges/batch/__init__.py",
+      "src/cartridges/batch/backends.py",
+      "src/cartridges/batch/keys.py",
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/storage/cache.py",
+      "src/cartridges/training/loops.py"
+    ],
+    "src/cartridges/batch/timeline.py": [
+      "src/cartridges/batch/outputs.py"
+    ],
+    "src/cartridges/cartridge/__init__.py": [],
+    "src/cartridges/cartridge/ask.py": [
+      "src/cartridges/cartridge/cache.py",
+      "src/cartridges/cartridge/train_distill.py"
+    ],
+    "src/cartridges/cartridge/cache.py": [],
+    "src/cartridges/cartridge/chunks.py": [
+      "src/cartridges/batch/outputs.py",
+      "src/cartridges/datagen/qa.py"
+    ],
+    "src/cartridges/cartridge/data.py": [
+      "src/cartridges/cartridge/chunks.py",
+      "src/cartridges/cartridge/selfstudy.py",
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/evals.py": [
+      "src/cartridges/datagen/qa.py"
+    ],
+    "src/cartridges/cartridge/grpo.py": [
+      "src/cartridges/cartridge/cache.py",
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/selfstudy.py": [
+      "src/cartridges/cartridge/chunks.py",
+      "src/cartridges/datagen/qa.py"
+    ],
+    "src/cartridges/cartridge/serve_cartridge.py": [
+      "src/cartridges/cartridge/train_distill.py"
+    ],
+    "src/cartridges/cartridge/tasks/__init__.py": [],
+    "src/cartridges/cartridge/tasks/cgc.py": [],
+    "src/cartridges/cartridge/tasks/chats.py": [
+      "src/cartridges/cartridge/chunks.py",
+      "src/cartridges/cartridge/tasks/types.py",
+      "src/cartridges/cartridge/tasks/validate.py"
+    ],
+    "src/cartridges/cartridge/tasks/export.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/judge.py": [],
+    "src/cartridges/cartridge/tasks/ksweep.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/label.py": [
+      "src/cartridges/cartridge/__init__.py",
+      "src/cartridges/cartridge/evals.py",
+      "src/cartridges/cartridge/tasks/__init__.py",
+      "src/cartridges/cartridge/tasks/targets.py",
+      "src/cartridges/cartridge/tasks/taxonomy.py",
+      "src/cartridges/cartridge/tasks/types.py",
+      "src/cartridges/cartridge/teacher.py",
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/tasks/neighbors.py": [],
+    "src/cartridges/cartridge/tasks/pairs.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/psych.py": [
+      "src/cartridges/cartridge/tasks/sampler.py",
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/qa.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/qgen.py": [
+      "src/cartridges/cartridge/tasks/types.py",
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/tasks/rubrics/judge-v0.1.md": [],
+    "src/cartridges/cartridge/tasks/rubrics/judge-v0.md": [],
+    "src/cartridges/cartridge/tasks/sampler.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/seed.py": [
+      "src/cartridges/cartridge/chunks.py",
+      "src/cartridges/cartridge/tasks/sampler.py",
+      "src/cartridges/cartridge/tasks/types.py",
+      "src/cartridges/cartridge/tasks/validate.py"
+    ],
+    "src/cartridges/cartridge/tasks/store.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/synthesize.py": [
+      "src/cartridges/cartridge/chunks.py",
+      "src/cartridges/cartridge/tasks/sampler.py",
+      "src/cartridges/cartridge/tasks/taxonomy.py",
+      "src/cartridges/cartridge/tasks/types.py",
+      "src/cartridges/cartridge/tasks/validate.py",
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/tasks/targets.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/taxonomy.py": [
+      "src/cartridges/cartridge/tasks/types.py"
+    ],
+    "src/cartridges/cartridge/tasks/types.py": [],
+    "src/cartridges/cartridge/tasks/validate.py": [
+      "src/cartridges/cartridge/tasks/types.py",
+      "src/cartridges/datagen/qa.py"
+    ],
+    "src/cartridges/cartridge/teacher.py": [
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/tracking.py": [
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cartridge/train_distill.py": [
+      "src/cartridges/cartridge/__init__.py",
+      "src/cartridges/cartridge/tracking.py",
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/cli.py": [
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/logging/config.py"
+    ],
+    "src/cartridges/datagen/__init__.py": [
+      "src/cartridges/datagen/loaders.py"
+    ],
+    "src/cartridges/datagen/agent/__init__.py": [],
+    "src/cartridges/datagen/agent/pipeline.py": [
+      "src/cartridges/datagen/agent/tools.py",
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/storage/cache.py"
+    ],
+    "src/cartridges/datagen/agent/tools.py": [
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/processors/ocr.py"
+    ],
+    "src/cartridges/datagen/flows.py": [
+      "src/cartridges/processors/ocr.py"
+    ],
+    "src/cartridges/datagen/loaders.py": [
+      "src/cartridges/processors/ocr.py"
+    ],
+    "src/cartridges/datagen/qa_dataset.py": [
+      "src/cartridges/datagen/qa.py"
+    ],
+    "src/cartridges/datagen/qa.py": [],
+    "src/cartridges/logging/__init__.py": [
+      "src/cartridges/logging/config.py"
+    ],
+    "src/cartridges/logging/config.py": [
+      "src/cartridges/logging/__init__.py"
+    ],
+    "src/cartridges/processors/__init__.py": [
+      "src/cartridges/processors/ocr.py"
+    ],
+    "src/cartridges/processors/extraction.py": [
+      "src/cartridges/storage/cache.py"
+    ],
+    "src/cartridges/processors/ocr.py": [
+      "src/cartridges/storage/cache.py"
+    ],
+    "src/cartridges/serve/__init__.py": [],
+    "src/cartridges/serve/backends.py": [
+      "src/cartridges/cartridge/__init__.py",
+      "src/cartridges/cartridge/serve_cartridge.py",
+      "src/cartridges/cartridge/teacher.py",
+      "src/cartridges/serve/gateway.py"
+    ],
+    "src/cartridges/serve/chat_models.py": [],
+    "src/cartridges/serve/evaluate.py": [
+      "src/cartridges/batch/backends.py",
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/training/loops.py",
+      "src/cartridges/training/metrics.py"
+    ],
+    "src/cartridges/serve/gateway.py": [
+      "src/cartridges/cartridge/evals.py",
+      "src/cartridges/serve/chat_models.py"
+    ],
+    "src/cartridges/serve/inference.py": [
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/serve/schema.py",
+      "src/cartridges/training/config.py",
+      "src/cartridges/training/finetune.py"
+    ],
+    "src/cartridges/serve/merge.py": [
+      "src/cartridges/serve/registry.py"
+    ],
+    "src/cartridges/serve/recipe.py": [
+      "src/cartridges/training/config.py"
+    ],
+    "src/cartridges/serve/registry.py": [
+      "src/cartridges/serve/recipe.py",
+      "src/cartridges/training/config.py"
+    ],
+    "src/cartridges/serve/schema.py": [
+      "src/cartridges/training/config.py"
+    ],
+    "src/cartridges/serve/vllm_server.py": [
+      "src/cartridges/serve/recipe.py"
+    ],
+    "src/cartridges/storage/__init__.py": [],
+    "src/cartridges/storage/cache.py": [],
+    "src/cartridges/training/__init__.py": [],
+    "src/cartridges/training/collator.py": [],
+    "src/cartridges/training/config.py": [],
+    "src/cartridges/training/dataset.py": [],
+    "src/cartridges/training/encoder_mask.py": [],
+    "src/cartridges/training/fast_decode.py": [
+      "src/cartridges/training/finetune.py",
+      "src/cartridges/training/perf_metrics.py"
+    ],
+    "src/cartridges/training/finetune.py": [
+      "src/cartridges/logging/__init__.py",
+      "src/cartridges/training/config.py"
+    ],
+    "src/cartridges/training/loops.py": [],
+    "src/cartridges/training/metrics.py": [],
+    "src/cartridges/training/perf_metrics.py": [],
+    "src/cartridges/training/profile_page_report.py": [
+      "src/cartridges/training/perf_metrics.py"
+    ],
+    "src/cartridges/training/profiling_report.py": [],
+    "src/cartridges/training/profiling_train.py": [
+      "src/cartridges/training/config.py",
+      "src/cartridges/training/finetune.py"
+    ],
+    "src/cartridges/training/profiling.py": [
+      "src/cartridges/training/config.py",
+      "src/cartridges/training/fast_decode.py",
+      "src/cartridges/training/finetune.py",
+      "src/cartridges/training/perf_metrics.py"
+    ],
+    "src/cartridges/training/review.py": [],
+    "tests/cartridge_cache_modal.py": [],
+    "tests/encoder_mask_modal.py": [],
+    "tests/test_backends.py": [],
+    "tests/test_batch_pipeline.py": [],
+    "tests/test_cartridge_ask.py": [],
+    "tests/test_cartridge_cache.py": [],
+    "tests/test_cartridge_chunks.py": [],
+    "tests/test_cartridge_evals.py": [],
+    "tests/test_cartridge_grpo.py": [
+      "tests/test_cartridge_cache.py"
+    ],
+    "tests/test_cartridge_tasks_cgc.py": [],
+    "tests/test_cartridge_tasks_chats.py": [],
+    "tests/test_cartridge_tasks_cli.py": [],
+    "tests/test_cartridge_tasks_export.py": [],
+    "tests/test_cartridge_tasks_judge.py": [],
+    "tests/test_cartridge_tasks_ksweep.py": [],
+    "tests/test_cartridge_tasks_label.py": [],
+    "tests/test_cartridge_tasks_neighbors.py": [],
+    "tests/test_cartridge_tasks_pairs.py": [],
+    "tests/test_cartridge_tasks_psych.py": [],
+    "tests/test_cartridge_tasks_qa.py": [],
+    "tests/test_cartridge_tasks_qgen.py": [],
+    "tests/test_cartridge_tasks_sampler.py": [],
+    "tests/test_cartridge_tasks_seed.py": [],
+    "tests/test_cartridge_tasks_store.py": [],
+    "tests/test_cartridge_tasks_synthesize.py": [],
+    "tests/test_cartridge_tasks_validate.py": [],
+    "tests/test_cartridge_teacher.py": [],
+    "tests/test_cartridge_tracking.py": [],
+    "tests/test_cartridge_train.py": [],
+    "tests/test_dataset_split.py": [],
+    "tests/test_encoder_mask.py": [],
+    "tests/test_fast_decode.py": [],
+    "tests/test_gateway.py": [],
+    "tests/test_journal_pipeline.py": [],
+    "tests/test_loops.py": [],
+    "tests/test_metrics.py": [],
+    "tests/test_page_dates.py": [],
+    "tests/test_page_store_postgres.py": [],
+    "tests/test_perf_metrics.py": [],
+    "tests/test_profile_page_report.py": [],
+    "tests/test_profiling_train.py": [],
+    "tests/test_qa.py": [],
+    "tests/test_review.py": [],
+    "tests/test_serve_registry.py": [],
+    "tests/test_timeline.py": []
+  }
+}

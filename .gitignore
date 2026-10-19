@@ -42,3 +42,9 @@ profiles/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# local-only
+.DS_Store
+/artifacts/
+/.playwright-mcp/
+/e2e/fixtures/tasks.json

@@ -42,4 +42,7 @@ prerelease = "allow"
 dev = [
     "marimo>=0.24.2",
     "pytest>=9.0.0",
+    "torch>=2.14.1",
+    "transformers>=5.10.4,<5.18",
+    "wandb-workspaces>=0.4.13",
 ]

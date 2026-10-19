@@ -1,0 +1,67 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+# Lines below are suggestions — uncomment to activate.
+# Use ! prefix to force-include something excluded by defaults.
+#
+# Built-in defaults (always excluded unless negated):
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js, etc.
+#
+# --- From .gitignore (uncomment to exclude) ---
+
+*.pyc
+__marimo__/
+data/
+# .env
+# /AGENTS.md
+# /CLAUDE.md
+# /CLAUDE.local.md
+/.prime/
+# /.agents/skills/
+# /.claude/skills/
+# /.cursor/skills/
+# /.factory/skills/
+# /.grok/skills/
+# /.opencode/skills/
+# /.pi/skills/
+/outputs/
+/output/
+/wandb/
+/prime-rl/
+# /environments/AGENTS.md
+/environments/*/outputs/
+/environments/*/dist/
+/environments/*/*.egg-info/
+/environments/*/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+# .neon
+# .env.local
+profiles/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# --- Detected directories (uncomment to exclude) ---
+
+# tests/
+# docs/
+# scripts/
+
+# --- Test file patterns (uncomment to exclude) ---
+
+# *.test.*
+# *.spec.*
+# *.snap
+
+# --- Session additions ---
+.understand-anything/
+.DS_Store
+artifacts/
+.venv/
+.playwright-mcp/
+.claude/
+.neon
+.env.local

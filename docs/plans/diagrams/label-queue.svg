@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1040 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="label-queue-title label-queue-desc" id="label-queue-root">
+        <title id="label-queue-title">Label queue: keep the GPU fed</title>
+        <desc id="label-queue-desc">A producer samples tasks into a durable Postgres job queue; a host dispatcher claims jobs and keeps a fixed window of requests in flight on the vLLM Teacher, while a result writer flushes completions to Parquet and Postgres off the critical path and acknowledges the jobs.</desc>
+        <defs>
+      <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif:ital@0;1&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');
+      #label-queue-root { --color-paper:   #f5f5f5;
+      --color-ink:     #2d3142;
+      --color-muted:   #4f5d75;
+      --color-accent:  #bf4520;
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace; }
+      #label-queue-root { font-family: var(--font-sans); color: var(--color-ink); }
+      #label-queue-root .diagram-container { width: 100%; overflow-x: auto; }
+      #label-queue-root .diagram-container { overflow-x: visible; }</style>
+          <marker id="label-queue-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="label-queue-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- Zones -->
+        <rect x="284" y="96" width="212" height="312" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="0.8" fill-opacity="0.02" stroke-opacity="0.10"/>
+        <rect x="324" y="100" width="132" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="390" y="109" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">POSTGRES · NEON</text>
+
+        <rect x="544" y="96" width="212" height="312" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="0.8" fill-opacity="0.02" stroke-opacity="0.10"/>
+        <rect x="584" y="100" width="132" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="650" y="109" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">HOST · CPU · ASYNC</text>
+
+        <rect x="804" y="96" width="212" height="312" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="0.8" fill-opacity="0.02" stroke-opacity="0.10"/>
+        <rect x="840" y="100" width="140" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="910" y="109" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">MODAL · H200 · VOLUME</text>
+
+        <!-- Arrows (drawn before nodes) -->
+        <!-- 1 Task Store -> Producer : SAMPLE -->
+        <path d="M300 356 H138 Q130 356 130 348 V194" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <rect x="138" y="282" width="44" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="140" y="291" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.08em">SAMPLE</text>
+
+        <!-- 2 Producer -> Job queue : ENQUEUE -->
+        <line x1="220" y1="156" x2="298" y2="156" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <rect x="234" y="136" width="52" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="260" y="145" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ENQUEUE</text>
+
+        <!-- 3 Job queue -> Dispatcher : CLAIM -->
+        <line x1="480" y1="156" x2="558" y2="156" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <rect x="498" y="136" width="44" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="520" y="145" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CLAIM</text>
+
+        <!-- 4 Dispatcher -> Teacher : SUBMIT (hot path) -->
+        <line x1="740" y1="144" x2="818" y2="144" stroke="#bf4520" stroke-width="1.6" marker-end="url(#label-queue-arrow-accent)"/>
+        <rect x="756" y="124" width="48" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="780" y="133" fill="#bf4520" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SUBMIT</text>
+
+        <!-- 5 Teacher -> Dispatcher : RESULTS (return) -->
+        <line x1="820" y1="168" x2="742" y2="168" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#label-queue-arrow)"/>
+        <rect x="754" y="176" width="52" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="780" y="185" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RESULTS</text>
+
+        <!-- 6 Dispatcher -> Result writer : BUFFER -->
+        <line x1="650" y1="192" x2="650" y2="318" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <rect x="658" y="236" width="44" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="660" y="245" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.08em">BUFFER</text>
+
+        <!-- 7 Result writer -> Target Store : SHARD -->
+        <line x1="740" y1="356" x2="818" y2="356" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <rect x="758" y="336" width="44" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="780" y="345" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SHARD</text>
+
+        <!-- 8 Result writer -> Task Store : LABELS -->
+        <line x1="560" y1="356" x2="482" y2="356" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <rect x="498" y="336" width="44" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="520" y="345" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LABELS</text>
+
+        <!-- 9 Result writer -> Job queue : ACK DONE (return) -->
+        <path d="M600 320 V276 Q600 268 592 268 H448 Q440 268 440 260 V194" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#label-queue-arrow)"/>
+        <rect x="492" y="248" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="520" y="257" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ACK DONE</text>
+
+        <!-- Nodes -->
+        <!-- Producer -->
+        <rect x="40" y="120" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="40" y="120" width="180" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="50" y="130" width="36" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8"/>
+        <text x="68" y="139" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">CPU</text>
+        <text x="130" y="160" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Producer</text>
+        <text x="130" y="175" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">sampler · origin mix</text>
+        <text x="130" y="186" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">runs ≥2× window ahead</text>
+
+        <!-- Job queue -->
+        <rect x="300" y="120" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="300" y="120" width="180" height="72" rx="6" fill="#ececec" stroke="#2d3142" stroke-width="1"/>
+        <rect x="310" y="130" width="36" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8"/>
+        <text x="328" y="139" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">PG</text>
+        <text x="390" y="160" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Job queue</text>
+        <text x="390" y="175" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">label_jobs · SKIP LOCKED</text>
+        <text x="390" y="186" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">leases · priority</text>
+
+        <!-- Dispatcher (focal) -->
+        <rect x="560" y="120" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="560" y="120" width="180" height="72" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1.4" fill-opacity="0.08"/>
+        <rect x="570" y="130" width="36" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="0.8"/>
+        <text x="588" y="139" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">HOST</text>
+        <text x="650" y="160" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Dispatcher</text>
+        <text x="650" y="175" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">credit window · 160 in flight</text>
+        <text x="650" y="186" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">refill on every completion</text>
+
+        <!-- Teacher GPU -->
+        <rect x="820" y="120" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="820" y="120" width="180" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="830" y="130" width="36" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8"/>
+        <text x="848" y="139" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">GPU</text>
+        <text x="910" y="160" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Teacher</text>
+        <text x="910" y="175" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">vLLM · 128 slots</text>
+        <text x="910" y="186" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">continuous batching</text>
+
+        <!-- Task Store -->
+        <rect x="300" y="320" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="300" y="320" width="180" height="72" rx="6" fill="#ececec" stroke="#2d3142" stroke-width="1"/>
+        <rect x="310" y="330" width="36" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8"/>
+        <text x="328" y="339" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">PG</text>
+        <text x="390" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Task Store</text>
+        <text x="390" y="375" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">tasks · labels</text>
+        <text x="390" y="386" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">unique label key</text>
+
+        <!-- Result writer -->
+        <rect x="560" y="320" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="560" y="320" width="180" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="570" y="330" width="36" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8"/>
+        <text x="588" y="339" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">HOST</text>
+        <text x="650" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Result writer</text>
+        <text x="650" y="375" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">flush 256 rows or 30 s</text>
+        <text x="650" y="386" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">COPY · one transaction</text>
+
+        <!-- Target Store -->
+        <rect x="820" y="320" width="180" height="72" rx="6" fill="#f5f5f5"/>
+        <rect x="820" y="320" width="180" height="72" rx="6" fill="#ececec" stroke="#2d3142" stroke-width="1"/>
+        <rect x="830" y="330" width="36" height="12" rx="2" fill="none" stroke="#5a6580" stroke-width="0.8"/>
+        <text x="848" y="339" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.1em">VOL</text>
+        <text x="910" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Target Store</text>
+        <text x="910" y="375" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">Parquet shards</text>
+        <text x="910" y="386" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle">top-20 logprobs</text>
+
+        <!-- Legend strip -->
+        <line x1="40" y1="436" x2="1000" y2="436" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+        <text x="40" y="456" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+        <line x1="110" y1="453" x2="140" y2="453" stroke="#bf4520" stroke-width="1.6" marker-end="url(#label-queue-arrow-accent)"/>
+        <text x="148" y="456" fill="#2d3142" font-size="9" font-family="'Geist', sans-serif">hot path: GPU never starves</text>
+        <line x1="300" y1="453" x2="330" y2="453" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#label-queue-arrow)"/>
+        <text x="338" y="456" fill="#2d3142" font-size="9" font-family="'Geist', sans-serif">data write</text>
+        <line x1="430" y1="453" x2="460" y2="453" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#label-queue-arrow)"/>
+        <text x="468" y="456" fill="#2d3142" font-size="9" font-family="'Geist', sans-serif">return / acknowledgement</text>
+        <rect x="640" y="447" width="16" height="12" rx="2" fill="#ececec" stroke="#2d3142" stroke-width="0.8"/>
+        <text x="664" y="456" fill="#2d3142" font-size="9" font-family="'Geist', sans-serif">durable store</text>
+        <rect x="760" y="447" width="16" height="12" rx="2" fill="#bf4520" stroke="#bf4520" stroke-width="0.8" fill-opacity="0.08"/>
+        <text x="784" y="456" fill="#2d3142" font-size="9" font-family="'Geist', sans-serif">focal: the new component</text>
+      </svg>

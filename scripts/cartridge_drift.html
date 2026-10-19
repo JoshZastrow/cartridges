@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cartridge Drift</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.0/plotly.min.js"></script>
+<style>
+  :root { --bg:#fbfbfa; --panel:#ffffff; --fg:#1d1d1f; --muted:#6b6b70; --line:#e4e4e7; --accent:#2563eb; --accent2:#d97706; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg:#111113; --panel:#1a1a1d; --fg:#ececee; --muted:#9a9aa2; --line:#2c2c31; --accent:#60a5fa; --accent2:#fbbf24; } }
+  :root[data-theme="dark"] { --bg:#111113; --panel:#1a1a1d; --fg:#ececee; --muted:#9a9aa2; --line:#2c2c31; --accent:#60a5fa; --accent2:#fbbf24; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:24px; margin:0 0 4px; } h2 { font-size:18px; margin:0 0 6px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin:0 0 18px; }
+  .note { color:var(--muted); font-size:13.5px; margin:4px 0 10px; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:6px 0 8px; }
+  select, button { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; }
+  button[aria-pressed="true"] { border-color:var(--accent); color:var(--accent); }
+  .stats { display:flex; flex-wrap:wrap; gap:18px; font-size:13.5px; color:var(--muted); }
+  .stats b { color:var(--fg); font-weight:600; }
+  .plot { width:100%; min-height:380px; }
+  ul { margin:6px 0 0; padding-left:20px; } li { margin:3px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cartridge drift</h1>
+  <p class="sub" id="sub"></p>
+
+  <section>
+    <h2>What this shows</h2>
+    <ul>
+      <li><b>Drift</b> is how far training moved the cartridge away from its starting point. The starting point is the
+        cache the base model produces when it reads the first <span class="p"></span> tokens of the real text
+        (the teacher's context block).</li>
+      <li><b>Relative drift</b> = ‖trained − init‖ / ‖init‖. 0 means unchanged; 1 means the change is as large as the
+        original cache.</li>
+      <li><b>Cosine</b> is the cosine similarity between init and trained (1 = same direction). How it is computed:
+        in the overview, for attention layers it is computed <i>per position</i> (each position's heads × head_dim vector)
+        and then averaged over positions; for DeltaNet states it is the cosine of the whole flattened tensor. Section 1b
+        uses the cosine of the whole flattened tensor for every layer type, because only then do drift, norm change and
+        angle fit together exactly.</li>
+      <li><b>Attention layers</b> store keys and values: one vector per position (heads × head_dim). Position 0, the
+        attention sink, is frozen and left out. <b>DeltaNet layers</b> store a recurrent state and a conv state instead
+        of per-position vectors.</li>
+      <li>The page holds only numbers and position indices. No journal text or tokens are embedded.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>1. Overview by layer</h2>
+    <p class="note">Relative drift of each layer's cache. Circles are attention layers (keys, values); squares are
+      DeltaNet layers (recurrent state, conv state). The lower panel shows the mean cosine similarity.</p>
+    <div id="overview" class="plot" style="min-height:560px"></div>
+  </section>
+
+
+  <section>
+    <h2>1b. Rotation or growth?</h2>
+    <p class="note">Each layer's change, measured on the whole flattened tensor, split three ways:
+      <b>norm change</b> ‖trained‖/‖init‖ − 1; <b>angle</b> arccos(cosine) between init and trained; and the
+      <b>perpendicular share</b> ‖Δ⊥‖/‖Δ‖, the part of the change Δ at right angles to init.</p>
+    <p class="note" id="rotread"></p>
+    <div id="decomp" class="plot" style="min-height:620px"></div>
+    <p class="note">Measured cosine against drift, with two reference models. <b>Perpendicular push</b>: Δ is
+      perpendicular to init, so the vector turns and also gets longer by √(1+drift²); this predicts cos = 1/√(1+drift²).
+      <b>Pure rotation</b>: length kept, direction turned; this predicts cos = 1 − drift²/2.</p>
+    <div id="cosmodel" class="plot" style="min-height:420px"></div>
+  </section>
+
+  <section>
+    <h2>2. Layer explorer (PCA)</h2>
+    <p class="note">Each position of the chosen layer gives one vector (heads × head_dim), before and after training.
+      Every <span class="stride"></span>th position is shown; color = position. Three projections:</p>
+    <ul class="note">
+      <li><b>Joint PCA</b> (default): PCA fitted on init and trained vectors together, so the 2D plane includes the
+        init→trained shift. Open circles are init, filled dots are trained, and a thin line joins each position's pair.</li>
+      <li><b>Displacement PCA</b>: PCA of the moves themselves, Δ = trained − init, without centering, so a shift
+        that all positions share shows up as direction 1. The bar chart gives each direction's share of the total
+        movement. A few tall bars mean positions moved in a few shared directions; a flat spectrum means the
+        movement is diffuse.</li>
+      <li><b>Init-only PCA</b>: PCA fitted on the init vectors only. Caveat: almost all of the movement points out of
+        this plane (see the in-plane share), so short lines here do not mean small drift.</li>
+    </ul>
+    <p class="note">If the in-plane share is small even for joint PCA, the movement has no dominant shared direction:
+      it is spread over many dimensions. The displacement spectrum shows how spread out it is.</p>
+    <div class="controls">
+      <label>Attention layer <select id="layer"></select></label>
+      <span><button id="kbtn" aria-pressed="true">Keys</button> <button id="vbtn" aria-pressed="false">Values</button></span>
+      <label>Projection <select id="mode">
+        <option value="joint">Joint PCA (init + trained)</option>
+        <option value="delta">Displacement PCA (Δ)</option>
+        <option value="init">Init-only PCA</option>
+      </select></label>
+    </div>
+    <div class="stats" id="pcastats"></div>
+    <div id="pca" class="plot" style="min-height:520px"></div>
+    <div id="spectrum" class="plot" style="min-height:240px; display:none"></div>
+  </section>
+
+  <section>
+    <h2>3. Per-position drift</h2>
+    <p class="note">Relative drift of each position's vector, averaged over bins of <span class="stride"></span>
+      positions. Rows are attention layers.</p>
+    <div class="controls"><span><button id="hk" aria-pressed="true">Keys</button> <button id="hv" aria-pressed="false">Values</button></span></div>
+    <div id="heat" class="plot" style="min-height:440px"></div>
+  </section>
+
+  <section>
+    <h2>4. DeltaNet recurrent state by head</h2>
+    <p class="note">Relative drift of each head's recurrent state. Rows are DeltaNet layers; columns are heads. The color
+      scale is capped at the 98th percentile (<span id="dcap"></span>), because a few heads with a near-zero initial state
+      have very large relative drift. Hover shows the true value.</p>
+    <div id="dheat" class="plot" style="min-height:560px"></div>
+  </section>
+</main>
+<script>
+const D = /*__DATA__*/null;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const base = () => ({
+  paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+  font: {color: css("--fg"), family: "system-ui, sans-serif", size: 12},
+  margin: {l: 60, r: 20, t: 20, b: 50}, legend: {orientation: "h", y: 1.08},
+  xaxis: {gridcolor: css("--line"), zerolinecolor: css("--line")},
+  yaxis: {gridcolor: css("--line"), zerolinecolor: css("--line")},
+});
+const cfg = {responsive: true, displaylogo: false};
+const m = D.meta;
+document.getElementById("sub").textContent =
+  `${m.base_model}, p = ${m.p}, ${m.attn_layers.length} attention + ${m.deltanet_layers.length} DeltaNet layers. ` +
+  `Trained: best checkpoint of W&B run ${m.trained_run} (${m.group}). Init recomputed from the same prefix; ` +
+  `frozen position 0 ${m.frozen_rel_diff === 0 ? "is bitwise identical" : "differs by " + m.frozen_rel_diff.toExponential(1)}.`;
+document.querySelectorAll(".p").forEach(e => e.textContent = m.p);
+document.querySelectorAll(".stride").forEach(e => e.textContent = m.stride);
+
+// 1. overview
+function overview() {
+  const A = D.overview.filter(r => r.type === "attention"), L = D.overview.filter(r => r.type === "deltanet");
+  const tr = (rows, key, name, color, symbol, yaxis = "y") => ({
+    x: rows.map(r => r.layer), y: rows.map(r => r[key]), name, mode: "markers+lines", yaxis,
+    line: {color, width: 1.5, dash: symbol === "square" ? "dot" : "solid"}, marker: {color, symbol, size: 7},
+    hovertemplate: `${name}<br>layer %{x}: %{y:.3f}<extra></extra>`,
+  });
+  const acc = css("--accent"), acc2 = css("--accent2"), mut = css("--muted");
+  const traces = [
+    tr(A, "keys_drift", "keys", acc, "circle"), tr(A, "values_drift", "values", acc2, "circle"),
+    tr(L, "recurrent_drift", "recurrent state", "#16a34a", "square"), tr(L, "conv_drift", "conv state", mut, "square"),
+    tr(A, "keys_cos", "keys cos", acc, "circle", "y2"), tr(A, "values_cos", "values cos", acc2, "circle", "y2"),
+    tr(L, "recurrent_cos", "recurrent cos", "#16a34a", "square", "y2"), tr(L, "conv_cos", "conv cos", mut, "square", "y2"),
+  ];
+  traces.slice(4).forEach(t => t.showlegend = false);
+  const lay = base();
+  Object.assign(lay, {
+    grid: {rows: 2, columns: 1, roworder: "top to bottom"},
+    xaxis: {...lay.xaxis, title: "layer index", dtick: 4},
+    yaxis: {...lay.yaxis, title: "relative drift", domain: [0.42, 1]},
+    yaxis2: {gridcolor: css("--line"), title: "mean cosine", domain: [0, 0.32], anchor: "x"},
+  });
+  Plotly.newPlot("overview", traces, lay, cfg);
+}
+
+
+// 1b. decomposition
+function decomp() {
+  const A = D.overview.filter(r => r.type === "attention"), L = D.overview.filter(r => r.type === "deltanet");
+  const series = [[A, "keys", css("--accent"), "circle"], [A, "values", css("--accent2"), "circle"],
+                  [L, "recurrent", "#16a34a", "square"], [L, "conv", css("--muted"), "square"]];
+  const label = {keys: "keys", values: "values", recurrent: "recurrent state", conv: "conv state"};
+  const rows = [["norm_change", "norm change", "y", v => v], ["angle_deg", "angle (°)", "y2", v => v], ["perp_share", "perpendicular share", "y3", v => v]];
+  const traces = [];
+  rows.forEach(([key, name, yaxis], ri) => series.forEach(([R, k, color, symbol]) => traces.push({
+    x: R.map(r => r.layer), y: R.map(r => r[`${k}_${key}`]), yaxis, name: label[k], showlegend: ri === 0,
+    mode: "markers+lines", line: {color, width: 1.5, dash: symbol === "square" ? "dot" : "solid"}, marker: {color, symbol, size: 6},
+    hovertemplate: `${label[k]}, layer %{x}<br>${name}: %{y:.3f}<extra></extra>`})));
+  const lay = base(), g = {gridcolor: css("--line"), zerolinecolor: css("--line")};
+  Object.assign(lay, {
+    xaxis: {...lay.xaxis, title: "layer index", dtick: 4, anchor: "y3"},
+    yaxis: {...g, title: "norm change", tickformat: "+.0%", domain: [0.70, 1], anchor: "x"},
+    yaxis2: {...g, title: "angle (°)", domain: [0.36, 0.64], anchor: "x"},
+    yaxis3: {...g, title: "perp. share", tickformat: ".1%", domain: [0, 0.30], anchor: "x"},
+  });
+  Plotly.newPlot("decomp", traces, lay, cfg);
+
+  const pts = [], d = Array.from({length: 71}, (_, i) => i / 100);
+  series.forEach(([R, k, color, symbol]) => pts.push({x: R.map(r => r[`${k}_drift`]), y: R.map(r => r[`${k}_cos_flat`]),
+    text: R.map(r => r.layer), mode: "markers", name: label[k], marker: {color, symbol, size: 7},
+    hovertemplate: `${label[k]}, layer %{text}<br>drift %{x:.3f}, cos %{y:.3f}<extra></extra>`}));
+  pts.push({x: d, y: d.map(v => 1 / Math.sqrt(1 + v * v)), mode: "lines", name: "perpendicular push 1/√(1+d²)", line: {color: css("--fg"), width: 1.5}});
+  pts.push({x: d, y: d.map(v => 1 - v * v / 2), mode: "lines", name: "pure rotation 1 − d²/2", line: {color: css("--fg"), width: 1.5, dash: "dash"}});
+  const cl = base(); cl.xaxis.title = "relative drift"; cl.yaxis.title = "cosine (flattened)";
+  Plotly.newPlot("cosmodel", pts, cl, cfg);
+
+  const pick = layer => D.overview.find(r => r.layer === layer);
+  const r51 = pick(51), r61 = pick(61);
+  const perpMin = Math.min(...series.flatMap(([R, k]) => R.map(r => r[`${k}_perp_share`])));
+  document.getElementById("rotread").innerHTML =
+    `Reading: in every layer the change is almost entirely perpendicular to the initial vector (at least ` +
+    `${(100 * perpMin).toFixed(1)}%). So training turned the cache into new directions: about ` +
+    `${r51.keys_angle_deg.toFixed(0)}° for layer 51's keys and ${r61.recurrent_angle_deg.toFixed(0)}° for layer 61's recurrent state. ` +
+    `Because the push is sideways, the vectors also got longer: layer 51's keys by ${(100 * r51.keys_norm_change).toFixed(0)}% and ` +
+    `layer 61's recurrent state by ${(100 * r61.recurrent_norm_change).toFixed(0)}%, as the perpendicular-push model predicts. ` +
+    `The measured cosines follow 1/√(1+drift²), not the pure-rotation curve. The vectors did not keep their length, ` +
+    `and they were not replaced either: they rotated substantially and grew.`;
+}
+
+// 2. PCA explorer
+const sel = document.getElementById("layer");
+m.attn_layers.forEach(l => sel.add(new Option(`layer ${l}`, l)));
+let kind = "keys";
+const modeSel = document.getElementById("mode");
+function pca() {
+  const e = D.pca[`${sel.value}-${kind}`], mode = modeSel.value, d = e[mode];
+  const row = D.overview.find(r => r.layer == sel.value);
+  const color = {color: e.pos, colorscale: "Viridis", cmin: 0, cmax: m.p};
+  const stats = [`<span>relative drift <b>${row[kind + "_drift"].toFixed(3)}</b></span>`,
+                 `<span>mean cosine <b>${row[kind + "_cos"].toFixed(3)}</b></span>`];
+  const lay = base(), spec = document.getElementById("spectrum");
+  if (mode === "delta") {
+    const traces = [{x: d.xy[0], y: d.xy[1], mode: "markers", name: "Δ per position", text: e.pos,
+      marker: {...color, size: 5, colorbar: {title: "position", thickness: 12}}, hovertemplate: "Δ, position %{text}<extra></extra>"}];
+    lay.xaxis.title = `Δ direction 1 (${(100 * d.energy10[0]).toFixed(1)}% of movement)`;
+    lay.yaxis.title = `Δ direction 2 (${(100 * d.energy10[1]).toFixed(1)}%)`;
+    Plotly.react("pca", traces, lay, cfg);
+    const top10 = d.energy10.reduce((x, y) => x + y, 0);
+    stats.push(`<span>top-1 direction <b>${(100 * d.energy10[0]).toFixed(1)}%</b></span>`,
+               `<span>top-2 <b>${(100 * (d.energy10[0] + d.energy10[1])).toFixed(1)}%</b></span>`,
+               `<span>top-10 <b>${(100 * top10).toFixed(1)}%</b> of the movement</span>`);
+    spec.style.display = "";
+    const sl = base(); sl.margin.t = 10;
+    sl.xaxis.title = "displacement direction"; sl.xaxis.dtick = 1; sl.yaxis.title = "share of movement"; sl.yaxis.tickformat = ".0%";
+    Plotly.react("spectrum", [{x: d.energy10.map((_, i) => i + 1), y: d.energy10, type: "bar",
+      marker: {color: css("--accent")}, hovertemplate: "direction %{x}: %{y:.1%}<extra></extra>"}], sl, cfg);
+  } else {
+    spec.style.display = "none";
+    const n = e.pos.length, lx = [], ly = [];
+    for (let i = 0; i < n; i++) { lx.push(d.init[0][i], d.trained[0][i], null); ly.push(d.init[1][i], d.trained[1][i], null); }
+    const traces = [
+      {x: lx, y: ly, mode: "lines", line: {color: css("--muted"), width: 0.5}, opacity: 0.45, hoverinfo: "skip", showlegend: false},
+      {x: d.init[0], y: d.init[1], mode: "markers", name: "init", text: e.pos,
+       marker: {...color, symbol: "circle-open", size: 6}, hovertemplate: "init, position %{text}<extra></extra>"},
+      {x: d.trained[0], y: d.trained[1], mode: "markers", name: "trained", text: e.pos,
+       marker: {...color, size: 5, colorbar: {title: "position", thickness: 12}}, hovertemplate: "trained, position %{text}<extra></extra>"},
+    ];
+    const of = mode === "joint" ? "init + trained" : "init";
+    lay.xaxis.title = `PC1 (${(100 * d.evr[0]).toFixed(1)}% of ${of} variance)`;
+    lay.yaxis.title = `PC2 (${(100 * d.evr[1]).toFixed(1)}%)`;
+    Plotly.react("pca", traces, lay, cfg);
+    stats.push(`<span>explained variance PC1+PC2 <b>${(100 * (d.evr[0] + d.evr[1])).toFixed(1)}%</b></span>`,
+               `<span>share of displacement inside this plane <b>${(100 * d.disp_in_plane).toFixed(1)}%</b></span>`);
+  }
+  document.getElementById("pcastats").innerHTML = stats.join("");
+}
+function toggle(a, b, set) { a.onclick = () => { a.ariaPressed = "true"; b.ariaPressed = "false"; set(); };
+                             b.onclick = () => { b.ariaPressed = "true"; a.ariaPressed = "false"; set(true); }; }
+toggle(document.getElementById("kbtn"), document.getElementById("vbtn"), v => { kind = v ? "values" : "keys"; pca(); });
+sel.onchange = pca; modeSel.onchange = pca;
+
+// 3. heatmap
+let hkind = "keys";
+function heat() {
+  const z = D.heat[hkind], bins = z[0].length;
+  const x = Array.from({length: bins}, (_, i) => 1 + i * m.stride);
+  const lay = base();
+  lay.xaxis.title = "position"; lay.yaxis.title = "attention layer"; lay.yaxis.type = "category";
+  Plotly.react("heat", [{z, x, y: m.attn_layers.map(String), type: "heatmap", colorscale: "Viridis",
+    colorbar: {title: "rel. drift", thickness: 12},
+    hovertemplate: "layer %{y}, positions %{x}+: %{z:.3f}<extra></extra>"}], lay, cfg);
+}
+toggle(document.getElementById("hk"), document.getElementById("hv"), v => { hkind = v ? "values" : "keys"; heat(); });
+
+// 4. DeltaNet heads
+function dheat() {
+  const all = D.deltanet_heads.flat().sort((a, b) => a - b), cap = all[Math.floor(0.98 * (all.length - 1))];
+  document.getElementById("dcap").textContent = cap.toFixed(2);
+  const lay = base();
+  lay.xaxis.title = "head"; lay.yaxis.title = "DeltaNet layer"; lay.yaxis.type = "category";
+  Plotly.newPlot("dheat", [{z: D.deltanet_heads, y: m.deltanet_layers.map(String), type: "heatmap", colorscale: "Viridis", zmin: 0, zmax: cap,
+    colorbar: {title: "rel. drift", thickness: 12}, hovertemplate: "layer %{y}, head %{x}: %{z:.3f}<extra></extra>"}], lay, cfg);
+}
+
+overview(); decomp(); pca(); heat(); dheat();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { overview(); decomp(); pca(); heat(); dheat(); });
+</script>
+</body>
+</html>

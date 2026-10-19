@@ -1,0 +1,7 @@
+{
+  "tasks": [
+    {"task_id": "example-1", "kind": "self_synthesis", "origin": "human", "text": "What themes come up most often across my journal entries?"},
+    {"task_id": "example-2", "kind": "change_over_time", "origin": "human", "text": "How has the way I write about work changed between my earliest and latest entries?"},
+    {"task_id": "example-3", "kind": "build_artifact", "origin": "human", "text": "Based on my journals, draft a short list of the values I seem to act on most."}
+  ]
+}

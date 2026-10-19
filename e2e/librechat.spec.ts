@@ -1,5 +1,11 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
-import tasks from './fixtures/tasks.json';
+
+// tasks.json (gitignored) holds real Task Store questions; the example ships with the repo.
+const fixtureDir = join(__dirname, 'fixtures');
+const fixture = ['tasks.json', 'tasks.example.json'].map((f) => join(fixtureDir, f)).find(existsSync)!;
+const tasks = JSON.parse(readFileSync(fixture, 'utf8')) as { tasks: { text: string }[] };
 
 const MODEL = process.env.LIBRECHAT_MODEL ?? 'mock-echo';
 const ENDPOINT = 'Journal';
