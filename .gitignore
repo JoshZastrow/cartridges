@@ -48,3 +48,7 @@ profiles/
 /artifacts/
 /.playwright-mcp/
 /e2e/fixtures/tasks.json
+
+# Reports (not code); the README figures under docs/report stay tracked
+docs/report/
+docs/cartridge-report.md
