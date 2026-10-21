@@ -303,13 +303,7 @@ def train(
     is large for qwen3_5's DeltaNet recurrent states (RMS ~0.05 on 4B)."""
     import torch
 
-    params = [x for x in cartridge.parameters() if x.requires_grad]
-    if relative_lr:
-        groups = [{"params": [x], "lr": lr * x.detach().pow(2).mean().sqrt().clamp(min=1e-3).item()} for x in params]
-        optimizer = torch.optim.Adam(groups, lr=lr)
-    else:
-        optimizer = torch.optim.Adam(params, lr=lr)
-    warmup = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / max(warmup_steps, 1)))
+    params, optimizer, warmup = make_optimizer(cartridge, lr, relative_lr, warmup_steps)
     device = params[0].device
     order = order if order is not None else _epoch_order(len(examples), epochs, seed)
     steps = math.ceil(len(order) / batch_size)
@@ -349,6 +343,21 @@ def train(
         if on_step(step):
             break
     return metrics
+
+
+def make_optimizer(cartridge, lr: float, relative_lr: bool, warmup_steps: int):
+    """(params, Adam, warmup LambdaLR) for the cartridge's trainable tensors,
+    as train() describes; shared with onpolicy.train_mixed."""
+    import torch
+
+    params = [x for x in cartridge.parameters() if x.requires_grad]
+    if relative_lr:
+        groups = [{"params": [x], "lr": lr * x.detach().pow(2).mean().sqrt().clamp(min=1e-3).item()} for x in params]
+        optimizer = torch.optim.Adam(groups, lr=lr)
+    else:
+        optimizer = torch.optim.Adam(params, lr=lr)
+    warmup = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / max(warmup_steps, 1)))
+    return params, optimizer, warmup
 
 
 def _epoch_order(n: int, epochs: int, seed: int) -> list[int]:
@@ -401,6 +410,10 @@ class PipelineConfig(BaseModel):
 
     distill: DistillConfig = DistillConfig()
     grpo: dict | None = {}
+    # Stage 2b, mixed on-policy distillation (onpolicy.OnPolicyConfig fields;
+    # skipped if None). Needs distill.label_runs (off-policy targets and
+    # on-policy questions) and distill.val_label_runs; runs on an H200.
+    onpolicy: dict | None = None
     qa_train_path: str = f"{VOLUME_PATH}/data/grpo/qa_train.jsonl"
     eval_path: str  # /vol/data/eval/<file>; required, no default eval set
     eval_max_items: int = 0  # checkpoint eval only; 0: all
@@ -444,6 +457,12 @@ def dry_run(config: PipelineConfig) -> dict:
         missing = [p for p in needed if not Path(p).exists()]
         if missing:
             raise FileNotFoundError(missing)
+        if config.onpolicy is not None:
+            from cartridges.cartridge.onpolicy import OnPolicyConfig
+
+            OnPolicyConfig(**config.onpolicy)
+            if not (d.label_runs and val):
+                raise ValueError("onpolicy needs distill.label_runs and val_label_runs")
         if d.resume_from:
             from cartridges.cartridge.cache import Cartridge
 
@@ -491,6 +510,9 @@ def pipeline(config: PipelineConfig) -> dict:
     if config.grpo is not None:
         results["grpo"] = _grpo(model, tokenizer, cartridge, config, out / "grpo")
         ref = results["grpo"]["artifact"]
+    if config.onpolicy is not None:
+        cartridge, results["onpolicy"] = _onpolicy(model, tokenizer, cartridge, config, out / "onpolicy")
+        ref = results["onpolicy"]["artifact"]
     if config.qa_eval:
         results["eval"] = _final_eval(model, tokenizer, cartridge, config, ref)
     if tasks:
@@ -690,6 +712,83 @@ def _grpo(model, tokenizer, cartridge, config: PipelineConfig, out: Path) -> dic
                    "artifact": run.log_artifact(out, type="cartridge", metadata={"p": cartridge.p, "model": d.model_id})}
         run.summary.update(summary)
     return summary
+
+
+def _onpolicy(model, tokenizer, cartridge, config: PipelineConfig, out: Path):
+    """Stage 2b in one onpolicy run: prefill the journal once (the teacher's
+    context block), then mixed on-policy distillation from `cartridge`, with
+    the teacher-forced val KL (stage 1's curve) and the on-policy val KL
+    (greedy answers to val questions, graded by the teacher) every val_every
+    steps. Early stopping on the on-policy val KL keeps <out_dir>/onpolicy-best.
+    Returns (the best cartridge, summary)."""
+    import torch
+
+    from cartridges.cartridge.cache import Cartridge
+    from cartridges.cartridge.onpolicy import OnPolicyConfig, onpolicy_val, prefill_journal, train_mixed
+    from cartridges.cartridge.teacher import render
+
+    d = config.distill
+    c = OnPolicyConfig(**config.onpolicy)
+    run_config = {"onpolicy": c.model_dump(), "distill": d.model_dump(), "init_cartridge": config.init_cartridge}
+    with tracking.init_run("distill", d.model_id, d.group, config=run_config, p=cartridge.p, role="onpolicy") as run:
+        cartridge.meta.update({"onpolicy_run_id": run.id, "onpolicy_from": config.init_cartridge or "distill"})
+        examples, order, val = prepare_data(d, run, tokenizer)
+        if order is None:
+            order = _epoch_order(len(examples), 1, d.seed)
+        # On-policy questions follow the same origin mix as the off-policy half (the
+        # origin-weighted order, walked from the other end); the labeled pool alone
+        # is ~89% psych_test. Val questions: an origin-stratified subset.
+        questions = [examples[i].prompt_ids for i in reversed(order)]
+        val_prompts = [e.prompt_ids for e in subset_labeled(val, c.val_n, d.seed).examples]
+        prefix_ids, _ = render(tokenizer, [{"role": "user", "content": "."}], Path(d.init_text_path).read_text())
+        with run.timer("prefill_journal", step=0):  # an unstepped log would advance W&B past validate(0)
+            scorer = prefill_journal(model, prefix_ids)
+        run.summary.update({"journal/prefix_tokens": len(prefix_ids), "journal/cache_gb": scorer.cache_bytes() / 1e9})
+        eos = _eos_ids(tokenizer)
+        best_dir = out.parent / "onpolicy-best"
+
+        def save_best() -> None:
+            cartridge.save(best_dir)
+            volume.commit()
+
+        best = EarlyStopping(c.patience, save=save_best)
+
+        def validate(step: int) -> bool:
+            metrics = {**val_kl(model, cartridge, val, d.max_seq_len),
+                       **onpolicy_val(model, cartridge, scorer.cache, val_prompts, c.val_max_new_tokens, eos,
+                                    c.max_gen_rows)}
+            stop = best.update(metrics["val/onpolicy_kl"], step)
+            run.log({**metrics, "val/step": step, "val/best_onpolicy_kl": best.best, "val/best_step": best.step},
+                    step=step)
+            return stop
+
+        torch.cuda.reset_peak_memory_stats()
+        validate(0)  # the starting checkpoint: step 0 of both val curves
+
+        def on_step(step: int) -> bool:
+            if step == 1 or step % 10 == 0:
+                run.log_gpu_memory(step=step)
+            return step % c.val_every == 0 and validate(step)
+
+        start = time.monotonic()
+        final = train_mixed(model, cartridge, examples, order, questions, scorer.cache, eos, c,
+                            max_seq_len=d.max_seq_len, log=run.log, on_step=on_step)
+        if best.saved:
+            cartridge = Cartridge.load(best_dir, device="cuda")
+        cartridge.save(out)
+        volume.commit()
+        summary = {
+            **final,
+            "best_step": best.step,
+            "best_onpolicy_kl": best.best,
+            "train_s": time.monotonic() - start,
+            "peak_mem_gb": torch.cuda.max_memory_allocated() / 2**30,
+            "cartridge_path": str(out),
+            "wandb_run_id": run.id,
+            "artifact": run.log_artifact(out, type="cartridge", metadata={"p": cartridge.p, "model": d.model_id}),
+        }
+        run.summary.update(summary)
+    return cartridge, summary
 
 
 def _final_eval(model, tokenizer, cartridge, config: PipelineConfig, cartridge_ref: str | None) -> dict:

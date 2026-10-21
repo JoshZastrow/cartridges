@@ -382,6 +382,15 @@ class Cli:
         best_val_kl: float = 0.0,
         out_dir: str = "",
         detach: bool = False,
+        onpolicy_steps: int = 0,
+        onpolicy_lambda: float = 0.5,
+        onpolicy_max_new_tokens: int = 768,
+        onpolicy_val_every: int = 5,
+        onpolicy_val_n: int = 16,
+        onpolicy_val_max_new_tokens: int = 512,
+        onpolicy_lr: float = 5e-2,
+        onpolicy_batch_size: int = 16,
+        onpolicy_samples_per_question: int = 2,
     ) -> None:
         """Train a cartridge end to end in one W&B group exp-<date>-<name>. `name`
         is required and should say what the experiment is for (e.g.
@@ -414,7 +423,13 @@ class Cli:
         resume_from (a /vol/... cartridge) continues stage 1 from it: skip_samples
         draws of the origin order are not replayed, best_val_kl seeds early
         stopping, out_dir should be new. detach spawns the GPU job in a detached
-        app and returns its call id: it keeps running if this client exits."""
+        app and returns its call id: it keeps running if this client exits.
+        onpolicy_steps > 0 adds stage 2b, mixed on-policy distillation
+        (onpolicy.py, docs/plans/onpolicy-distill.md) after stage 1 or from
+        init_cartridge: onpolicy_lambda of each batch is the cartridge's own
+        answers graded by the teacher (journal prefilled on the same GPU: use
+        gpu=H200), the rest stage-1 targets from label_runs; on-policy val KL on
+        onpolicy_val_n val questions every onpolicy_val_every steps."""
         from cartridges.cartridge import data, tracking, train_distill as td
         from cartridges.cartridge.tasks.taxonomy import LABEL_ORIGIN_MIX
 
@@ -430,6 +445,8 @@ class Cli:
         rates = tracking.GPU_RATES_USD_PER_HOUR
         teacher_hours = (2.0 if build_data else 0.0) + (0.5 if judge else 0.0) + (0.5 if task_eval else 0.0)
         estimate = rates[td.GPU] * (2.0 if "27B" in model else 1.0) + rates[GPU_FOR_MODEL[model]] * teacher_hours
+        if onpolicy_steps:  # ~2 min/step on an H200, plus ~10 min load + journal prefill
+            estimate += rates.get(gpu or "H200", rates["H200"]) * (onpolicy_steps * 2 / 60 + 0.2)
         estimate = estimate_usd or estimate
         tracking.check_budget(estimate)
         results = {"group": group, "estimate_usd": estimate}
@@ -446,6 +463,11 @@ class Cli:
                 best_val_kl=best_val_kl or None, out_dir=out_dir or f"{td.VOLUME_PATH}/cartridges/{group}",
             ),
             grpo={"max_steps": grpo_steps} if grpo_steps else None,
+            onpolicy={"steps": onpolicy_steps, "lam": onpolicy_lambda, "max_new_tokens": onpolicy_max_new_tokens,
+                      "val_every": onpolicy_val_every, "val_n": onpolicy_val_n,
+                      "val_max_new_tokens": onpolicy_val_max_new_tokens, "lr": onpolicy_lr,
+                      "batch_size": onpolicy_batch_size, "samples_per_question": onpolicy_samples_per_question,
+                      } if onpolicy_steps else None,
             eval_path=f"{td.VOLUME_PATH}/data/eval/{eval_set}",
             eval_max_items=eval_max_items,
             judge=judge,
@@ -1169,7 +1191,8 @@ class Cli:
     def eval_judge(self, cartridge: str, label_runs: str, model: str = "Qwen/Qwen3.8-27B", group: str = "",
                    n: int = 60, seed: int = 0, rubric: str = "v0.1", max_new_tokens: int = 3072,
                    out_dir: str = "data/cartridge/eval", journals: str = "data/journals/output/2026_10_13",
-                   estimate_usd: float = 3.0) -> None:
+                   estimate_usd: float = 3.0, cap_usd: float = 0.0, reserve_usd: float = 0.6,
+                   note: str = "") -> None:
         """Side-by-side judge on a stratified subset of n eval tasks. Three answers per
         task, all to the same prompt (label.answer_messages): TEACHER = the eval label
         (journal in context, no GPU); CARTRIDGE = train_distill.answer_tasks (A100,
@@ -1178,7 +1201,11 @@ class Cli:
         the 27B judge (same Teacher container, journal in context, both orders, one
         batch): cartridge vs teacher (headline) and base vs teacher (floor). Logs one
         eval run (system=cartridge, role=judge) with the judge metrics, citation
-        validity for all three answers, and the artifact judge-side-by-side-27b."""
+        validity for all three answers, and the artifact judge-side-by-side-27b.
+        cap_usd > 0: a hard cap for this run. Cartridge answers are decoded in
+        source-interleaved order and the decode stops (its app is stopped) when the
+        next answer would cross cap_usd - reserve_usd (the H200 base + judge
+        reserve); the judge then covers the tasks answered so far."""
         import json
 
         import modal
@@ -1191,7 +1218,10 @@ class Cli:
         from cartridges.cartridge.tasks import judge, store
         from cartridges.cartridge.tasks.label import answer_messages
 
-        tracking.check_budget(estimate_usd)
+        import subprocess
+        import time
+
+        tracking.check_budget(cap_usd or estimate_usd)
         run_ids = _id_list(label_runs)  # fire passes "a,b" as a tuple
         with store.connect() as conn:
             labels = {str(lab.task_id): lab for lab in store.fetch_labels(conn, run_ids, split="eval")}
@@ -1216,13 +1246,24 @@ class Cli:
                 saved.setdefault(tid, {"task_id": tid})[system] = o
             write()
 
-        todo = _unanswered(ids, subset, saved, "cartridge")
+        origin = {str(t.task_id): t.origin for t in subset}
+        todo = _interleave(_unanswered(ids, subset, saved, "cartridge"), lambda r: origin[r["task_id"]])
+        capped = False
         if todo:  # streamed: each answer is saved as it is decoded (the container also keeps /vol/answers/<group>.jsonl)
+            rate = tracking.GPU_RATES_USD_PER_HOUR[train_distill.GPU]
             with modal.enable_output(), train_distill.app.run(detach=True):  # survives a client disconnect
-                _collect(train_distill.answer_tasks.remote_gen(cartridge, todo, group, model, max_new_tokens),
-                         saved, "cartridge", write)
-        if not all("cartridge" in saved.get(tid, {}) for tid in ids):
+                stop = _decode_cap(cap_usd - reserve_usd, rate, time.monotonic) if cap_usd else None
+                capped = _collect(train_distill.answer_tasks.remote_gen(cartridge, todo, group, model, max_new_tokens),
+                                  saved, "cartridge", write, stop)
+                if capped:  # a detached app keeps decoding after the client stops reading: stop it
+                    subprocess.run(["modal", "app", "stop", train_distill.app.app_id], check=False)
+        done = [t for t in subset if "cartridge" in saved.get(str(t.task_id), {})]
+        if not done:
+            raise SystemExit(f"no cartridge answers ({answers_path})")
+        if len(done) < len(subset) and not capped:
             raise SystemExit(f"cartridge answers missing for some tasks; rerun to resume ({answers_path})")
+        n_requested, subset = len(subset), done
+        ids = [str(t.task_id) for t in subset]
         rub = judge.load_rubric(rubric)
         handle = teacher_mod.teacher_cls("Teacher", model)
         container_id = handle.info.remote()["container_id"]
@@ -1253,6 +1294,7 @@ class Cli:
         rows_path = Path(out_dir) / f"judge-side-by-side-{group}.jsonl"
         rows_path.write_text("".join(json.dumps(r) + "\n" for r in rows))
         config = {"system": "cartridge", "metric": "judge", "cartridge": cartridge, "n": len(ids), "seed": seed,
+                  "n_requested": n_requested, "capped": capped, "cap_usd": cap_usd, "note": note,
                   "max_new_tokens": max_new_tokens, "label_runs": ",".join(run_ids),
                   **judge.judge_config(rub, model, "cartridge|base", "teacher")}
         with tracking.init_run("eval", model, group, config, role="judge") as run:
@@ -1289,13 +1331,45 @@ def _unanswered(ids: list[str], tasks: list, saved: dict, system: str) -> list[d
             if system not in saved.get(tid, {})]
 
 
-def _collect(stream, saved: dict, system: str, write) -> None:
+def _collect(stream, saved: dict, system: str, write, stop=None) -> bool:
     """Store each streamed answer row under saved[task_id][system] and write()
-    right away, so a failure part way keeps every answer decoded so far."""
+    right away, so a failure part way keeps every answer decoded so far. If
+    stop() turns true after a row, stop reading and return True."""
     for row in stream:
         saved.setdefault(row["task_id"], {"task_id": row["task_id"]})[system] = {
             k: row[k] for k in ("text", "finish_reason", "n_tokens")}
         write()
+        if stop is not None and stop():
+            return True
+    return False
+
+
+def _interleave(rows: list[dict], key) -> list[dict]:
+    """Round-robin over key(row) groups (in first-seen order), so a run cut short
+    still covers every group."""
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(key(r), []).append(r)
+    out, queues = [], list(groups.values())
+    while any(queues):
+        for q in queues:
+            if q:
+                out.append(q.pop(0))
+    return out
+
+
+def _decode_cap(budget_usd: float, rate_usd_per_hour: float, clock):
+    """stop() for _collect: true when the next answer, at the mean time per answer
+    so far (after the first, which includes the model load), would cross budget_usd
+    of GPU time since this call."""
+    start, times = clock(), []
+
+    def stop() -> bool:
+        times.append(clock())
+        per = (times[-1] - times[0]) / (len(times) - 1) if len(times) > 1 else times[0] - start
+        return (times[-1] - start + per) / 3600 * rate_usd_per_hour > budget_usd
+
+    return stop
 
 
 def _download_shards(uris: list[str], cache_dir: Path) -> Path:

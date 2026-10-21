@@ -222,3 +222,25 @@ def test_eval_judge_streams_cartridge_answers_and_resumes():
     assert writes == [{"t0", "t1"}]  # t1 written before the failure
     assert saved["t1"]["cartridge"] == {"text": "A", "finish_reason": "stop", "n_tokens": 2}
     assert _unanswered(ids, tasks, saved, "cartridge") == [{"task_id": "t2", "text": "Q2?"}]  # resume asks for t2 only
+
+
+def test_decode_order_interleaves_sources_and_cap_stops_before_crossing():
+    from cartridges.cli import _collect, _decode_cap, _interleave
+
+    rows = [{"task_id": f"c{i}", "o": "chat"} for i in range(3)] + [{"task_id": "h0", "o": "human"}] + \
+        [{"task_id": f"p{i}", "o": "psych"} for i in range(2)]
+    assert [r["task_id"] for r in _interleave(rows, lambda r: r["o"])] == ["c0", "h0", "p0", "c1", "p1", "c2"]
+
+    # $3.6/h = $0.001/s; budget $0.35: first answer at 100 s (load), then 60 s each -> answers end at 100..340 s;
+    # after the 5th (340 s) the next would end at 400 s = $0.40 > $0.35, so reading stops there
+    now = [0.0]
+    stop = _decode_cap(0.35, 3.6, lambda: now[0])
+
+    def stream():
+        for i, t in enumerate([100, 160, 220, 280, 340, 400]):
+            now[0] = t
+            yield {"task_id": f"t{i}", "text": "a", "finish_reason": "stop", "n_tokens": 1}
+
+    saved = {}
+    assert _collect(stream(), saved, "cartridge", lambda: None, stop) is True
+    assert sorted(saved) == ["t0", "t1", "t2", "t3", "t4"]

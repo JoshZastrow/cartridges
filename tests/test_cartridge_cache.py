@@ -3,7 +3,7 @@ import pytest
 torch = pytest.importorskip("torch")
 from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig  # noqa: E402
 
-from cartridges.cartridge.cache import Cartridge  # noqa: E402
+from cartridges.cartridge.cache import Cartridge, merge_caches  # noqa: E402
 
 
 def tiny_model(seed: int = 0):
@@ -185,3 +185,52 @@ def test_gradient_checkpointing_gives_same_grads():
         grads.append([p.grad.clone() for p in cart.parameters()])
     for a, b in zip(*grads):
         torch.testing.assert_close(a, b)
+
+
+def _trim(row: list[int], eos: int) -> list[int]:
+    return row[: row.index(eos) + 1] if eos in row else row
+
+
+def test_generate_batch_matches_per_prompt_generate():
+    """Prompts of different lengths decoded as one batch give the same greedy
+    tokens as decoding each prompt alone (padding stays out of the result)."""
+    model = tiny_model()
+    cart = Cartridge.from_prefill(model, ids(P))
+    prompts = [ids(5, seed=10)[0].tolist(), ids(9, seed=11)[0].tolist(), ids(3, seed=12)[0].tolist()]
+    batched = cart.generate_batch(model, prompts, n=2, max_new_tokens=8)
+    assert batched.shape == (6, 8)
+    for i, prompt in enumerate(prompts):
+        alone = cart.generate(model, torch.tensor([prompt]), max_new_tokens=8)[0].tolist()
+        assert batched[2 * i].tolist() == alone and batched[2 * i + 1].tolist() == alone
+
+
+def test_generate_batch_stops_rows_independently():
+    model = tiny_model()
+    cart = Cartridge.from_prefill(model, ids(P))
+    prompts = [ids(5, seed=10)[0].tolist(), ids(9, seed=11)[0].tolist()]
+    free = cart.generate(model, torch.tensor([prompts[0]]), max_new_tokens=8)[0].tolist()
+    eos = free[2]  # prompt 0 stops at its third token; prompt 1 keeps going unless it emits it too
+    batched = cart.generate_batch(model, prompts, n=1, max_new_tokens=8, eos_token_id=eos)
+    for i, prompt in enumerate(prompts):
+        alone = cart.generate(model, torch.tensor([prompt]), max_new_tokens=8, eos_token_id=eos)[0].tolist()
+        assert _trim(batched[i].tolist(), eos) == _trim(alone, eos)
+    assert _trim(batched[0].tolist(), eos) == free[:3]
+
+
+def test_merged_cache_decode_step_matches_each_prompt_alone():
+    """One decode step through the merged, padded cache gives each row the
+    logits of running its own prompt + token after the cartridge, unbatched."""
+    model = tiny_model()
+    cart = Cartridge.from_prefill(model, ids(P))
+    prompts = [ids(5, seed=10)[0].tolist(), ids(9, seed=11)[0].tolist(), ids(3, seed=12)[0].tolist()]
+    nxt = torch.tensor([7, 8, 9])
+    with torch.no_grad():
+        caches = [cart(model, torch.tensor([q]), read_only=False).past_key_values for q in prompts]
+        cache, prompt_mask = merge_caches(caches, [len(q) for q in prompts])
+        mask = torch.cat([prompt_mask.new_ones(3, cart.p), prompt_mask, prompt_mask.new_ones(3, 1)], dim=1)
+        pos = torch.tensor([cart.p + len(q) for q in prompts])[:, None]
+        got = model(input_ids=nxt[:, None], position_ids=pos, attention_mask=mask, past_key_values=cache,
+                    use_cache=True).logits[:, -1]
+        for i, q in enumerate(prompts):
+            want = cart(model, torch.tensor([q + [nxt[i].item()]])).logits[0, -1]
+            torch.testing.assert_close(got[i], want, rtol=1e-4, atol=1e-4)

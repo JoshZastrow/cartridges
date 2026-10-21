@@ -226,25 +226,47 @@ class Cartridge(nn.Module):
         Returns [B, T] new tokens; rows that hit EOS are padded with the EOS id after it.
         Unpadded prompts keep padding out of the linear layers' recurrent state.
         """
-        eos = torch.tensor([eos_token_id] if isinstance(eos_token_id, int) else (eos_token_id or []), device=input_ids.device)
         out = self(model, input_ids, read_only=False)
-        cache, pos = out.past_key_values, self.p + input_ids.shape[1]
-        logits = out.logits[:, -1].float()
-        done = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
-        tokens = []
-        for _ in range(max_new_tokens):
-            nxt = sample(logits, temperature, top_p, generator)
-            if eos.numel():
-                nxt = torch.where(done, eos[0], nxt)
-                done |= torch.isin(nxt, eos)
-            tokens.append(nxt)
-            if done.all():
-                break
-            position_ids = torch.full((input_ids.shape[0], 1), pos, device=input_ids.device)
-            out = model(input_ids=nxt[:, None], position_ids=position_ids, past_key_values=cache, use_cache=True)
-            cache, pos = out.past_key_values, pos + 1
-            logits = out.logits[:, -1].float()
-        return torch.stack(tokens, dim=1) if tokens else input_ids.new_zeros(input_ids.shape[0], 0)
+        pos = torch.full((input_ids.shape[0],), self.p + input_ids.shape[1], device=input_ids.device)
+        return _decode(model, out.past_key_values, out.logits[:, -1].float(), pos, None, max_new_tokens,
+                       temperature, top_p, eos_token_id, generator)
+
+    @torch.no_grad()
+    def generate_batch(
+        self,
+        model,
+        prompts: list[list[int]],
+        n: int = 1,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        eos_token_id: int | list[int] | None = None,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        """`n` continuations of each prompt (prompts may differ in length), decoded
+        together. Returns [len(prompts) * n, T] new tokens, prompt-major (prompt i's
+        rows are i*n .. i*n+n-1); rows that hit EOS are padded with the EOS id.
+
+        Each prompt is prefilled on its own, unpadded, as `generate` does: padding
+        in a prefill would enter the linear layers' recurrent state. The caches are
+        then merged (merge_caches) and decoded as one batch: attention keys/values
+        are padded behind each prompt and masked out, linear-layer states are
+        fixed-size and stack as they are, and each row keeps its own positions.
+        A single-token decode step passes no padding mask to the linear layers.
+        """
+        device = next(self.parameters()).device
+        caches, logits, lengths = [], [], []
+        for prompt in prompts:
+            ids = torch.tensor([prompt], device=device).expand(n, -1)
+            out = self(model, ids, read_only=False, logits_to_keep=1)
+            caches.append(out.past_key_values)
+            logits.append(out.logits[:, -1].float())
+            lengths += [len(prompt)] * n
+        cache, prompt_mask = merge_caches(caches, [len(p) for p in prompts])
+        lengths = torch.tensor(lengths, device=device)
+        mask = torch.cat([prompt_mask.new_ones(len(lengths), self.p), prompt_mask], dim=1)
+        return _decode(model, cache, torch.cat(logits), self.p + lengths, mask, max_new_tokens,
+                       temperature, top_p, eos_token_id, generator)
 
     # ---- artifact -------------------------------------------------------------
 
@@ -303,6 +325,65 @@ class Cartridge(nn.Module):
             p.numel() for p in [*self.trainable_keys, *self.trainable_values, *self.conv_states]
         )
         return kv * size + sum(p.numel() * 4 for p in self.recurrent_states)
+
+
+def merge_caches(caches: list[CartridgeCache], prompt_lengths: list[int]) -> tuple[CartridgeCache, torch.Tensor]:
+    """One decode cache from per-prompt prefill caches (each [n_i rows], after a
+    p-token cartridge and its prompt). Attention keys/values are zero-padded
+    behind each prompt to the longest one and concatenated over rows; linear
+    layers' conv and recurrent states are concatenated as they are. Returns the
+    cache and the rows' mask over the prompt slots [rows, max_len] (0 = padding),
+    to follow the cartridge's p ones."""
+    longest = max(prompt_lengths)
+    layers = []
+    for j, first in enumerate(caches[0].layers):
+        if isinstance(first, _CartridgeLinearLayer):
+            conv = torch.cat([c.layers[j].conv_states[0] for c in caches])
+            rec = torch.cat([c.layers[j].recurrent_states[0] for c in caches])
+            layers.append(_CartridgeLinearLayer(conv, rec))
+            continue
+        kv = []
+        for name in ("keys", "values"):
+            parts = [nn.functional.pad(getattr(c.layers[j], name), (0, 0, 0, longest - n)) for c, n in zip(caches, prompt_lengths)]
+            kv.append(torch.cat(parts))
+        layer = DynamicLayer()
+        layer.lazy_initialization(*kv)
+        layer.keys, layer.values = kv
+        layers.append(layer)
+    attn = next(j for j, layer in enumerate(layers) if isinstance(layer, DynamicLayer))
+    rows = [c.layers[attn].keys.shape[0] for c in caches]
+    mask = torch.zeros(sum(rows), longest, dtype=torch.long, device=layers[attn].keys.device)
+    start = 0
+    for r, n in zip(rows, prompt_lengths):
+        mask[start : start + r, :n] = 1
+        start += r
+    return CartridgeCache(layers), mask
+
+
+def _decode(model, cache, logits: torch.Tensor, pos: torch.Tensor, mask: torch.Tensor | None, max_new_tokens: int,
+            temperature: float, top_p: float, eos_token_id, generator) -> torch.Tensor:
+    """Sample up to max_new_tokens per row from `logits` [B, V] onward. `pos` [B]:
+    each row's next position; `mask` [B, cache length] (None: no padding) gains a
+    column per new token. Rows that hit EOS keep emitting the first EOS id."""
+    B, device = logits.shape[0], logits.device
+    eos = torch.tensor([eos_token_id] if isinstance(eos_token_id, int) else (eos_token_id or []), device=device)
+    done = torch.zeros(B, dtype=torch.bool, device=device)
+    tokens = []
+    for _ in range(max_new_tokens):
+        nxt = sample(logits, temperature, top_p, generator)
+        if eos.numel():
+            nxt = torch.where(done, eos[0], nxt)
+            done |= torch.isin(nxt, eos)
+        tokens.append(nxt)
+        if done.all():
+            break
+        if mask is not None:
+            mask = torch.cat([mask, mask.new_ones(B, 1)], dim=1)
+        out = model(input_ids=nxt[:, None], position_ids=pos[:, None], attention_mask=mask, past_key_values=cache,
+                    use_cache=True)
+        cache, pos = out.past_key_values, pos + 1
+        logits = out.logits[:, -1].float()
+    return torch.stack(tokens, dim=1) if tokens else torch.zeros(B, 0, dtype=torch.long, device=device)
 
 
 def sample(logits: torch.Tensor, temperature: float, top_p: float, generator: torch.Generator | None = None) -> torch.Tensor:
