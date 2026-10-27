@@ -134,14 +134,74 @@ The stage 1 metric does not get worse. It improves a little.
 
 *Table 4: Stage 2 results.*
 
+On the 198 held-out questions of Table 3, stage 2 also improves the token metrics a little.
+
+| Measure | Stage 1 | **Stage 2** |
+|---|---|---|
+| CGC | 0.55 (0.53–0.58) | **0.58** (0.56–0.60) |
+| Perplexity on the Teacher's answers | 2.09 | **2.03** |
+| Top-1 token agrees with the Teacher | 81.3% | **82.1%** |
+
+*Table 5: Token metrics after stage 2 (W&B eval run `2gjvqve2`).*
+
 A learning rate of 5e-2 in stage 2 did not work.
 The on-policy KL stayed flat, and the teacher-forced KL increased to 0.413.
 
 Stage 1 cost about $26 of GPU time, including labels, the sweep, training and evaluation.
 Stage 2 cost $4.07, about 80 s for each step.
 
-I have not yet measured whether the lower KL gives better answers.
-A side-by-side comparison with a model judge is in progress.
+### Answer quality
+
+The lower KL does not yet give correct answers.
+The cartridge learns how the Teacher writes, but not the facts.
+
+On short factual questions (`qa_heldout_dev.jsonl`: 137 answerable, 30 not in the journal),
+the Teacher grades each answer as correct or not.
+
+| Measure | Base model | **Cartridge (stage 2)** | Teacher |
+|---|---|---|---|
+| Correct (answerable questions) | 0.7% | **9.5%** | 75.9% |
+| Token F1 | 0.02 | **0.07** | 0.52 |
+| Cited page exists | 0.7% | **75.2%** | 99.3% |
+| Cited page has the evidence | 0% | **1.5%** | 85.4% |
+| Abstains on an answerable question | 98.5% | **10.2%** | 4.4% |
+| Abstains on a question not in the journal | 100% | **20%** | 53% |
+
+*Table 6: QA results.*
+
+The cartridge closes about 12% of the accuracy gap, much less than the 58% CGC.
+It answers with confidence and cites a page, but the page is almost always wrong.
+
+On 60 open questions, a judge compares each answer with the Teacher's answer.
+The judge is the same model as the Teacher, with the journal in context.
+It sees both answers blind, in both orders.
+
+| Measure | Base model | **Cartridge (stage 2)** |
+|---|---|---|
+| Win / tie / loss against the Teacher | 0% / 7% / 93% | **2% / 15% / 83%** |
+| Answers with a factual error | 5% | **80%** (Teacher: 2%) |
+| Fidelity, 1–5 (Teacher 4.47) | – | **2.78** |
+| Coverage, 1–5 (Teacher 4.19) | – | **3.05** |
+| Responsiveness, 1–5 (Teacher 4.73) | – | **4.07** |
+
+*Table 7: Side-by-side judge, 60 held-out tasks.*
+
+The cartridge writes the Teacher's kind of answer: direct quotes with page citations.
+But it invents the quotes or puts them on the wrong page.
+
+> **Where to find the results locally.** The files are in `data/cartridge/eval/` (gitignored):
+>
+> | File | What it holds |
+> |---|---|
+> | `cgc-report-stage2.md` | Full CGC report for Table 5, by source and kind |
+> | `cgc-report.md` | The same report for stage 1 (Table 3) |
+> | `qa_heldout_dev.jsonl` | The 167 QA items for Table 6 |
+> | `judge-side-by-side-exp-20261024-eval-27b-stage2.jsonl` | One row per task for Table 7: the three answers, verdicts, errors, scores |
+> | `judge-exp-20261024-eval-27b-stage2.jsonl` | The raw cartridge and base answers that the judge read |
+>
+> The per-answer QA rows for Table 6 are only in W&B, group `exp-20261024-eval-27b-stage2`.
+
+The next experiments are in [`docs/plans/next-experiments.md`](docs/plans/next-experiments.md).
 The design for stage 2 is in [`docs/plans/onpolicy-distill.md`](docs/plans/onpolicy-distill.md).
 
 ## Project layout
