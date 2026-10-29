@@ -210,8 +210,9 @@ def test_prompt_names_must_be_bare(bad):
 def test_prompt_path():
     from voice.deploy_hertz import prompt_path
 
-    assert prompt_path("prompt-30s.wav", False) == "/voice/prompt-30s.wav"
-    assert prompt_path("mine.wav", True) == "/voice/prompts/mine.wav"
+    assert prompt_path("prompt-30s.wav") == "/voice/prompt-30s.wav"
+    with pytest.raises(ValueError):
+        prompt_path("prompts/../x.wav")
 
 
 def test_server_takes_no_paths_from_clients(backend):

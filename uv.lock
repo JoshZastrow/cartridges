@@ -5453,6 +5453,7 @@ hertz = [
     { name = "fastapi" },
     { name = "scipy" },
     { name = "uvicorn" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -5477,6 +5478,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.14.1" },
     { name = "uvicorn", marker = "extra == 'hertz'", specifier = ">=0.32" },
     { name = "wandb", specifier = ">=0.30.0" },
+    { name = "websockets", marker = "extra == 'hertz'", specifier = ">=13" },
 ]
 provides-extras = ["hertz"]
 

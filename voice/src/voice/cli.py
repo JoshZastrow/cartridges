@@ -1,11 +1,11 @@
 """`voice` command line: encode | train | eval | report | deploy | serve-local, each with --backend; evalset.
 
     uv run voice train --config sft.toml [--dry-run]
-    uv run voice deploy --backend personaplex --system stock     # Modal app voice-serve; prints the WebSocket URL
+    uv run voice deploy --backend personaplex|hertz --system stock  # Modal app voice-serve; prints the WebSocket URL
     uv run voice serve-local --backend personaplex [--port 8998] # the same server on this machine's GPU
     uv run voice evalset [--dry-run] [--stage ...]               # build voice-evalset (python -m voice.evalset)
 
-`train` (#19), `deploy` and `serve-local` (#20), `evalset` (#22) are implemented; the rest are
+`train` (#19), `deploy` and `serve-local` (#20; hertz deploy #21), `evalset` (#22) are implemented; the rest are
 stubs naming the issue that ships them.
 """
 

@@ -54,6 +54,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from voice.backends.base import Dialogue
+from voice.hertz_transport import HertzTransport
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class MoshiTransport:
         await self.ws.close()
 
 
-TRANSPORTS = {"personaplex": MoshiTransport}
+TRANSPORTS = {"personaplex": MoshiTransport, "hertz": HertzTransport}
 
 
 def place(chunks: list[tuple[float, np.ndarray]], n_samples: int, sample_rate: int) -> np.ndarray:

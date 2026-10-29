@@ -102,7 +102,7 @@ def test_cli_dry_run_exits_zero(tmp_path):
     assert cli.main(["train", "--dry-run"]) == 0
 
 
-@pytest.mark.parametrize("command", ["encode", "eval", "report", "deploy"])
+@pytest.mark.parametrize("command", ["encode", "eval", "report"])  # deploy: every backend is served
 def test_cli_stubs_take_backend(command, capsys):
     assert cli.main([command, "--backend", "hertz"]) == 2
     assert "not implemented yet" in capsys.readouterr().err

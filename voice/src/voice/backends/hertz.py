@@ -39,7 +39,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -216,11 +216,18 @@ class HertzBackend:
             raise RuntimeError("set_prompt() first: the stock system needs its prompt wav")
         return HertzSession(self, self.prompt, temps, cache_len)
 
+    client_path = "/audio"  # where a client connects, under the server's URL
+
     def serve(self, cartridge: Cartridge | None, port: int, cache_len: int = CONTEXT_FRAMES) -> "HertzServer":
         """Start the WebSocket server (upstream protocol) on `port` in a daemon
-        thread; returns once it accepts connections."""
+        thread; returns once it accepts connections. Loads the model if needed;
+        the stock prompt must be set (`set_prompt`)."""
         if cartridge is not None:
             raise NotImplementedError("serving a cartridge is #12/#18")
+        if self.prompt is None:
+            raise RuntimeError("set_prompt() first: the stock system needs its prompt wav")
+        if self.model is None:
+            self.load()
         import uvicorn
 
         server = uvicorn.Server(uvicorn.Config(make_app(self, cache_len), host="0.0.0.0", port=port, log_level="info"))
@@ -230,7 +237,7 @@ class HertzBackend:
             if not thread.is_alive():
                 raise RuntimeError("hertz server failed to start")
             time.sleep(0.1)
-        return HertzServer(url=f"ws://localhost:{port}/audio", server=server, thread=thread)
+        return HertzServer(url=f"ws://localhost:{port}{self.client_path}", server=server, thread=thread)
 
     # ------------------------------------------------------------ cartridge half (#18)
 
@@ -333,8 +340,14 @@ class CpuStandIn:
 @dataclass
 class HertzServer:
     url: str
-    server: object = None
+    server: object = None  # uvicorn.Server
     thread: threading.Thread | None = None
+    timings: dict = field(default_factory=dict)  # seconds: load_s, ready_s (set by the deployer)
+
+    def wait(self) -> int:
+        """Block until the server stops; 0 on a clean exit."""
+        self.thread.join()
+        return 0
 
 
 def make_app(backend: HertzBackend, cache_len: int = CONTEXT_FRAMES):
