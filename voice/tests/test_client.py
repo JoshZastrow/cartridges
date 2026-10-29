@@ -115,17 +115,40 @@ def test_cli_deploy_dry_run_prints_the_stock_url_without_modal(capsys):
     assert cli.main(["deploy", "--backend", "personaplex", "--system", "voice-cartridge:v0", "--dry-run"]) == 2
 
 
-def test_sphn_opus_holds_exactly_the_pinned_frames():
-    """The server-side share of transport_s is a constant of the pinned sphn: its
+def test_sphn_opus_holds_the_pinned_frames():
+    """The server's decode hold, a property of the pinned sphn (0.1.12): its
     OpusStreamWriter emits a page on every 80 ms chunk (no encode hold) and its
-    OpusStreamReader returns no PCM until OPUS_HOLD_FRAMES pages later."""
+    OpusStreamReader returns its first PCM only after OPUS_HOLD_FRAMES + 1 pages.
+    Later pages are decoded on a background thread, so a read straight after an
+    append can lag a frame or two more; nothing is lost once it catches up. So
+    `codec_hold_s` is the tested minimum of the server's hold."""
+    import time
+
     writer, reader = sphn.OpusStreamWriter(SAMPLE_RATE), sphn.OpusStreamReader(SAMPLE_RATE)
     pcm = tone(2.0, 0.0, 2.0)
-    out = 0
-    for k in range(1, len(pcm) // FRAME_SIZE + 1):
+    n, out, first = len(pcm) // FRAME_SIZE, 0, None
+    for k in range(1, n + 1):
         writer.append_pcm(pcm[(k - 1) * FRAME_SIZE:k * FRAME_SIZE])
         page = writer.read_bytes()
         assert page, f"writer held chunk {k}"
         reader.append_bytes(page)
+        got = reader.read_pcm().shape[-1]
+        out += got
+        if got and first is None:
+            first = k
+    assert first == MoshiTransport.OPUS_HOLD_FRAMES + 1
+    for _ in range(100):
+        time.sleep(0.01)
         out += reader.read_pcm().shape[-1]
-        assert out == max(0, k - MoshiTransport.OPUS_HOLD_FRAMES) * FRAME_SIZE, k
+    assert out >= (n - MoshiTransport.OPUS_HOLD_FRAMES) * FRAME_SIZE
+
+
+def test_auth_headers_only_for_modal_and_fail_clearly_when_unset():
+    from voice.client import auth_headers
+
+    assert auth_headers("ws://127.0.0.1:8998/api/chat") == {}
+    url = "wss://me--voice-serve-personaplex.us-east.modal.run/api/chat?voice_prompt=NATF2.pt"
+    env = {"MODAL_PROXY_TOKEN_ID": "wk-1", "MODAL_PROXY_TOKEN_SECRET": "ws-2"}
+    assert auth_headers(url, env) == {"Modal-Key": "wk-1", "Modal-Secret": "ws-2"}
+    with pytest.raises(RuntimeError, match="MODAL_PROXY_TOKEN_SECRET"):
+        auth_headers(url, {"MODAL_PROXY_TOKEN_ID": "wk-1"})

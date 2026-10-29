@@ -15,6 +15,10 @@ scales to zero after `SCALEDOWN_S` idle, and at most one container runs. The
 container logs its startup split (`resolve_s`: weights on disk, `ready_s`:
 server listening); the client measures the whole cold start as the handshake
 time of the first connection.
+
+The endpoint requires Modal proxy auth: a connection without a workspace proxy
+token is refused (401) before it reaches a container. `voice.client` sends
+the token from MODAL_PROXY_TOKEN_ID / MODAL_PROXY_TOKEN_SECRET (voice/README.md).
 """
 
 from __future__ import annotations
@@ -58,7 +62,7 @@ def start(name: str, port: int = PORT):
 
 @app.function(image=image, gpu="H200", volumes={DATA_MOUNT: data_volume}, secrets=[modal.Secret.from_name("HF_TOKEN")],
               env={"HF_HOME": HF_HOME}, timeout=3600, scaledown_window=SCALEDOWN_S, max_containers=1)
-@modal.web_server(PORT, startup_timeout=1200)
+@modal.web_server(PORT, startup_timeout=1200, requires_proxy_auth=True)
 def personaplex():
     logging.basicConfig(level=logging.INFO)
     start("personaplex")

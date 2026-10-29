@@ -23,9 +23,16 @@ included. `Conversation.transport_s` is the transport's share, measured per
 conversation as the sum of
     send_hold_s           median(page left - PCM due) of the user's Opus pages
     server_decode_hold_s  the transport's `codec_hold_s`: the server's Opus reader
-                          holds that long before its first PCM (a constant of the
-                          pinned sphn, asserted in tests/test_client.py)
+                          returns no PCM before that (a property of the pinned sphn,
+                          asserted in tests/test_client.py). It is a lower bound: sphn
+                          decodes later pages on a background thread, which can add
+                          a frame or two; client_decode_hold_s is the same reader
+                          measured, so it is an estimate of the server's full hold
     client_decode_hold_s  first decoded agent PCM - first raw agent audio message
+
+A `*.modal.run` endpoint requires Modal proxy auth: the client sends the
+`Modal-Key` / `Modal-Secret` headers from the env vars MODAL_PROXY_TOKEN_ID /
+MODAL_PROXY_TOKEN_SECRET (see voice/README.md), and refuses to connect without them.
 
     python -m voice.client smoke --url <ws-url> --prompts <dir of wavs> --out outputs/smoke
 """
@@ -36,10 +43,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -87,7 +96,7 @@ class MoshiTransport:
 
     sample_rate = 24000
     frame_size = 1920
-    OPUS_HOLD_FRAMES = 3  # sphn 0.1.12's OpusStreamReader: first PCM after the 4th page (tests/test_client.py)
+    OPUS_HOLD_FRAMES = 3  # sphn 0.1.12's OpusStreamReader: first PCM after the 4th page, never earlier (tests)
     codec_hold_s = OPUS_HOLD_FRAMES * frame_size / sample_rate  # 0.24 s
     HANDSHAKE, AUDIO, TEXT = 0, 1, 2
 
@@ -148,6 +157,20 @@ def place(chunks: list[tuple[float, np.ndarray]], n_samples: int, sample_rate: i
     return out
 
 
+PROXY_ENV = ("MODAL_PROXY_TOKEN_ID", "MODAL_PROXY_TOKEN_SECRET")
+
+
+def auth_headers(url: str, env=os.environ) -> dict[str, str]:
+    """Modal proxy-auth headers for a `*.modal.run` URL; none for any other host."""
+    if not (urlsplit(url).hostname or "").endswith(".modal.run"):
+        return {}
+    missing = [k for k in PROXY_ENV if not env.get(k)]
+    if missing:
+        raise RuntimeError(f"{url.split('?')[0]} requires Modal proxy auth; set {' and '.join(missing)} "
+                           "(a workspace proxy auth token, see voice/README.md)")
+    return {"Modal-Key": env[PROXY_ENV[0]], "Modal-Secret": env[PROXY_ENV[1]]}
+
+
 def load_user(wav: str | Path | np.ndarray, sample_rate: int) -> np.ndarray:
     """Mono float32 at `sample_rate`; an array is taken as already at that rate."""
     if isinstance(wav, np.ndarray):
@@ -184,7 +207,8 @@ class Client:
         sent: list[tuple[float, float, int]] = []
         text: list[tuple[float, str]] = []
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+        headers = auth_headers(self.url)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), headers=headers) as session:
             c0 = time.monotonic()
             await tr.connect(session, self.url)
             t0 = time.monotonic()
@@ -290,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-s", type=float, default=20.0)
     s.add_argument("--limit", type=int, default=10)
     s.add_argument("--group", default="", help="W&B group exp-YYYYMMDD-<slug>; empty: no W&B run")
-    s.add_argument("--name", default="personaplex/stock/eval-smoke", help="W&B run name <backend>/<system>/<stage>")
+    s.add_argument("--name", default="personaplex/stock/serve-smoke", help="W&B run name <backend>/<system>/<stage>")
     args = p.parse_args(argv)
     src = Path(args.prompts)
     wavs = sorted(str(x) for x in src.glob("*.wav")) if src.is_dir() else [str(src)]
@@ -303,14 +327,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def log_smoke(rows: list[dict], args) -> None:
     """One W&B run in project `voice`: the per-prompt table and the latency summary.
-    Tagged `serve-check`, not `baseline`, and summarised under `smoke/`, so the
-    report never mixes it with #9's section 8 metrics."""
+    Stage `serve-smoke` (a non-eval stage), tagged `check`, not `baseline`, and
+    summarised under `smoke/`, so the report never mixes it with eval rows."""
     import wandb
 
     from shared import tracking
 
     with tracking.start_run("voice", args.group, vars(args), name=args.name, job_type="eval", gpu="CPU",
-                            tags=["serve-check", args.backend]) as run:
+                            tags=["check", args.backend]) as run:
         cols = list(rows[0])
         run.log({"smoke/prompts": wandb.Table(columns=cols, data=[[r[c] for c in cols] for r in rows])})
         def median(key):
