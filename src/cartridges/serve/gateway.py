@@ -82,13 +82,17 @@ def text_of(content: str | list[dict[str, Any]] | None) -> str:
     return content or ""
 
 
-def clean_messages(messages: list[ChatMessage]) -> list[dict]:
-    """Pass the client's messages through; drop empty system turns."""
-    return [
+def clean_messages(messages: list[ChatMessage], system: str | None = None) -> list[dict]:
+    """Pass the client's messages through; drop empty system turns, then open
+    with `system` (the model's default system turn) if no system turn is left."""
+    out = [
         m.model_dump(mode="json")
         for m in messages
         if not (m.role == "system" and not text_of(m.content).strip())
     ]
+    if system and not any(m["role"] == "system" for m in out):
+        out.insert(0, {"role": "system", "content": system})
+    return out
 
 
 def mock_generate(messages: list[dict]) -> dict:
@@ -160,7 +164,7 @@ def build_app(
                                 **({"gpu": model.gpu} if model.gpu else {}))
 
     async def generate(model: ChatModel, request: ChatRequest) -> tuple[str, str | None, Usage]:
-        messages = clean_messages(request.messages)
+        messages = clean_messages(request.messages, model.system)
         if model.backend == "mock":
             result = mock_generate(messages)
         else:
@@ -208,7 +212,7 @@ def build_app(
         """The backend's events as chunks, each as it arrives (the blocking
         Modal generator runs in a thread and feeds a queue)."""
         loop, queue, end = asyncio.get_running_loop(), asyncio.Queue(), object()
-        messages = clean_messages(request.messages)
+        messages = clean_messages(request.messages, model.system)
 
         def pump() -> None:
             try:

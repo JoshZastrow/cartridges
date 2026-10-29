@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from cartridges.cartridge.tasks.label import CITATION_REMINDER
 from cartridges.serve.chat_models import CHAT_MODELS
 from cartridges.serve.gateway import ECHO_PREFIX, TransientBackendError, build_app
 
@@ -62,8 +63,9 @@ def test_non_stream_reply_strips_think_and_reports_usage():
     assert reply["choices"][0]["message"] == {"role": "assistant", "content": "The answer [p. 3]."}
     assert reply["choices"][0]["finish_reason"] == "stop"
     assert reply["usage"] == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
-    # the empty system turn is dropped, the rest passes through
-    assert calls == [("Qwen/Qwen3.5-4B", True, [{"role": "user", "content": "When did I move?"}], 64, 0.2)]
+    # the empty system turn is dropped; the model's default system turn opens the rest
+    reminded = [{"role": "system", "content": CITATION_REMINDER}, {"role": "user", "content": "When did I move?"}]
+    assert calls == [("Qwen/Qwen3.5-4B", True, reminded, 64, 0.2)]
 
 
 def test_cartridge_model_routes_to_cartridge_backend():
@@ -169,7 +171,8 @@ def test_live_stream_sends_each_event_with_its_token_count():
     assert [(c["choices"][0]["delta"]["content"], c["tokens"]) for c in chunks[1:3]] == [("Hel", 1), ("lo.", 2)]
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
     assert chunks[-1]["usage"] == {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
-    assert calls == [(("Qwen/Qwen3.8-27B", True, [{"role": "user", "content": "hi"}], 1024, None), {})]
+    reminded = [{"role": "system", "content": CITATION_REMINDER}, {"role": "user", "content": "hi"}]
+    assert calls == [(("Qwen/Qwen3.8-27B", True, reminded, 1024, None), {})]
 
 
 def test_live_stream_passes_the_cartridge_gpu():
@@ -237,3 +240,22 @@ def test_cartridge_vllm_non_stream_routes_to_the_engine_of_the_base_model():
     response = vllm_client(calls).post("/v1/chat/completions", json=chat("journal-cartridge-27b-am-vllm"), headers=AUTH)
     assert response.json()["choices"][0]["message"]["content"] == "vLLM answer"
     assert calls == [("generate", "Qwen/Qwen3.8-27B", "/vol/cartridges/exp-20261027-am-stage2/onpolicy-best", 1024, None)]
+
+
+def test_journal_models_get_the_training_system_turn_when_the_client_sends_none():
+    # Teacher labels, cartridge training and evals all open with the citation
+    # reminder; without it the 27B cartridge answers every question alike.
+    seen: list = []
+
+    def generate(*args, **kwargs):
+        seen.append(args[-3])  # messages
+        return FakeGeneration(text="ok")
+
+    client = TestClient(build_app(generate, generate, api_key="key", cartridge_vllm_generate=generate))
+    own = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "q"}]
+    for model in ("journal-cartridge-27b-am-vllm", "journal-cartridge-27b-am", "journal-teacher-27b"):
+        client.post("/v1/chat/completions", json=chat(model, "q"), headers=AUTH)
+        client.post("/v1/chat/completions", json={"model": model, "messages": own}, headers=AUTH)
+    client.post("/v1/chat/completions", json=chat("qwen3.5-4b-base", "q"), headers=AUTH)
+    reminded = [{"role": "system", "content": CITATION_REMINDER}, {"role": "user", "content": "q"}]
+    assert seen == [reminded, own] * 3 + [[{"role": "user", "content": "q"}]]
