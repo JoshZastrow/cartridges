@@ -484,7 +484,8 @@ all in `voice/src/voice/backends/base.py`: `StreamSpec(name, role, kind,
 vocab, dim)`, `KVGroup(keys, values, num_frozen)` (first `num_frozen`
 positions are buffers, the rest fp32 parameters), `GMMParams(locs, scales,
 weights)`, `LossWeights(streams, default=1.0, extra)` with `.of(stream)`,
-`Targets(topk_ids, topk_logprobs)` per stream `[T, k]` built with
+`Targets(topk_ids, topk_logprobs)` per stream `[N, k]` with N = T − 1
+(rows for frames 0..T−2 only; see alignment below), built with
 `Targets.from_rows(rows)` (rejects frame gaps), `Server` (`url`),
 `BackendSpec.hash`, and `Dialogue` (fields of `dialogue.jsonl`, wavs as
 paths; #10 may move it to `data.py` and re-export). `BackendConfig` also
@@ -499,7 +500,9 @@ num_frozen_tokens, voice_sha, persona, digest_sha, stage, step}`, one
 
 **Alignment (binding for #8, #13, #18):** logits at position t predict
 frame t+1 (next-frame). A target row with `frame = t` holds the teacher's
-distribution at position t, so it also predicts frame t+1. `sft_loss` pairs
+distribution at position t, so it also predicts frame t+1. There is no
+target row for the last frame T−1: a dialogue of T frames has T−1 rows
+per stream. `sft_loss` pairs
 `logits[:, :-1]` with `tokens[1:]`; `distill_loss` pairs `logits[:, t]` with
 target row t.
 
