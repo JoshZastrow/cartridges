@@ -112,7 +112,7 @@ class Frames(BaseModel):
         with safe_open(str(path), framework="pt") as f:
             meta = json.loads(f.metadata()["meta"])
             tensors = {k: f.get_tensor(k) for k in f.keys()}
-        split = lambda prefix: {k.removeprefix(prefix): v for k, v in tensors.items() if k.startswith(prefix)}  # noqa: E731
+        split = lambda prefix: {k.removeprefix(prefix): v for k, v in tensors.items() if k.startswith(prefix)}
         return cls(tokens=split("tokens."), latents=split("latents."), meta=meta)
 
 

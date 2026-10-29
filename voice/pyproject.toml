@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.14.0b2",
     "safetensors>=0.4",
     "shared",
+    "soundfile>=0.13",
     "torch>=2.14.1",
     "wandb>=0.30.0",
 ]

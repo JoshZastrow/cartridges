@@ -5442,6 +5442,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "safetensors" },
     { name = "shared" },
+    { name = "soundfile" },
     { name = "torch" },
     { name = "wandb" },
 ]
@@ -5461,6 +5462,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14.0b2" },
     { name = "safetensors", specifier = ">=0.4" },
     { name = "shared", editable = "shared" },
+    { name = "soundfile", specifier = ">=0.13" },
     { name = "torch", specifier = ">=2.14.1" },
     { name = "wandb", specifier = ">=0.30.0" },
 ]

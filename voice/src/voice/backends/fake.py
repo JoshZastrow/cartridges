@@ -16,17 +16,25 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from voice.backends.base import (
-    BackendSpec, Cartridge, Dialogue, Frames, KVGroup, LossWeights, Outputs, StreamSpec, Targets,
+    BackendSpec,
+    Cartridge,
+    Dialogue,
+    Frames,
+    KVGroup,
+    LossWeights,
+    Outputs,
+    StreamSpec,
+    Targets,
 )
 from voice.backends.registry import FakeConfig, register
 
 
 def kl_to_topk(logits: Tensor, topk_ids: Tensor, topk_logprobs: Tensor) -> Tensor:
-    """Mean over positions of KL(teacher top-k renormalised || student) on those k ids.
+    """KL(teacher || student) over the teacher's top-k entries, mean over
+    positions, as `cartridges.cartridge.train_distill.distill_loss` computes it.
     logits [T, V], topk_* [T, k]."""
-    teacher = topk_logprobs.log_softmax(-1)
-    student = logits.log_softmax(-1).gather(-1, topk_ids)
-    return (teacher.exp() * (teacher - student)).sum(-1).mean()
+    student = logits.float().log_softmax(-1).gather(-1, topk_ids)
+    return (topk_logprobs.exp() * (topk_logprobs - student)).sum(-1).mean()
 
 
 @register("fake")

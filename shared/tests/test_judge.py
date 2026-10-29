@@ -33,7 +33,7 @@ def test_parse_verdict(text, ok):
 
 def test_combine_needs_both_orders_to_agree():
     item = jg.Item(task_id="t", origin="o", kind="k", question="q", x="x", y="y")
-    v = lambda w, e="none": jg.Verdict(winner=w, factual_errors=e)  # noqa: E731
+    v = lambda w, e="none": jg.Verdict(winner=w, factual_errors=e)
     assert jg.combine(item, v("A"), v("B")).winner == "x"
     assert jg.combine(item, v("A"), v("A")).winner == "tie"  # position bias
     o = jg.combine(item, v("A", "A"), v("B", "none"))

@@ -1,7 +1,6 @@
 """shared.targets: Parquet top-k shards with a stream column."""
 
 import pytest
-
 from shared.targets import TargetRow, read_shards, resolve, shard_uri, write_shard
 
 

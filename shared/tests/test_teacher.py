@@ -41,5 +41,5 @@ def test_sampling_kwargs_and_topk():
         "n": 1, "max_tokens": 8, "logprobs": None, "seed": None, "temperature": 0.0}
     kw = t.sampling_kwargs(2, 8, 5, None, 1, {"type": "object"}, lambda json: ("so", json))
     assert kw["top_k"] == 20 and kw["structured_outputs"] == ("so", {"type": "object"})
-    lp = lambda x: SimpleNamespace(logprob=x)  # noqa: E731
+    lp = lambda x: SimpleNamespace(logprob=x)
     assert t.topk_from_vllm([{3: lp(-2.0), 4: lp(-0.5), 9: lp(-1.0)}], k=2) == ([[4, 9]], [[-0.5, -1.0]])

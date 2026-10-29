@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-
 from shared.optim import EarlyStopping, make_optimizer
 
 
