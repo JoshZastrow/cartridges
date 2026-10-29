@@ -255,6 +255,12 @@ set by the issues before it.
   `voice/src/voice/train.py` (#8 sets this up; everyone else reuses the
   image). Patches to the fork (#12) live in `voice/src/voice/patches/` and
   are applied at import, not committed into the vendored tree.
+  The fork's own pins (torch<2.5, numpy<2.2, huggingface-hub<0.25, …)
+  conflict with the root lock, so the root `pyproject.toml` carries
+  `[tool.uv] override-dependencies` for them (coordinator decision on #19)
+  and the fork runs on the root versions (torch 2.14, numpy 2.x, hf-hub
+  1.x), which NVIDIA did not test. The Modal image installs the fork with
+  `--no-deps` over those versions (`voice.train.image`; reuse it).
 - **GPU work runs on Modal, `gpu="H200"`.** Every GPU entry point has a
   `--dry-run` that runs on CPU with a tiny fixture before spending money.
   Spend cap per issue: $40 unless the issue says otherwise; post the W&B
@@ -454,20 +460,48 @@ what a trained prefix exploits.
 Later issues code against these. Changing one means a comment on every issue
 that consumes it, before the change.
 
-**Shared library (from #19)**
+**Shared library (from #19, shipped in #23)**
 ```
-shared.teacher.Teacher          # Qwen on vLLM/Modal: generate(messages, max_tokens, logprobs, temperature)
-shared.teacher.render(tokenizer, messages, context) -> (prompt_ids, ...)
-shared.tracking.start_run(project, group, config) / log_artifact(run, path, type)
-shared.judge.judge(answers, tasks, references, generate, rubric) -> (rows, summary, details)
-shared.targets.write_shard(rows, uri) / read_shards(uris) ; TargetRow has a `stream` field
-shared.optim.make_optimizer(params, lr, relative_lr, warmup_steps) ; EarlyStopping(patience, save)
+shared.teacher.Teacher.generate(messages, max_tokens=512, n=1, logprobs=0, with_context=True,
+                                temperature=None, seed=None, json_schema=None)
+shared.teacher.render(tokenizer, messages, context=None, instructions="", system_turn=..., chat_template_kwargs=...)
+                                -> (prefix_ids, prompt_ids)
+shared.tracking.start_run(project, group, config=None, *, name, job_type, gpu, tags, ...) -> TrackedRun
+shared.tracking.log_artifact(run, path, type, **kw)
+shared.judge.judge(answers, tasks, references, generate, rubric, with_context=False, seed=0) -> (outcomes, summary, items)
+shared.judge.load_rubric(path)
+shared.targets.write_shard(rows, uri) / read_shards(uris, root=None, mounts=())
+                                # TargetRow = {id, frame, stream, topk_ids, topk_logprobs}: one row per (id, frame, stream)
+shared.optim.make_optimizer(params, lr, relative_lr=False, warmup_steps=0) -> (params, Adam, warmup)
+shared.optim.EarlyStopping(patience, save)
 ```
+Journal-specific defaults (instructions, system turn, stop token, context
+path, rubric path) are keyword parameters, not constants.
 
-**Backend protocol, `Frames`, `Cartridge`, registry (from #19)**: as written
-in section 4b. `cartridge.json`: `{backend, spec_hash, base_model,
-fork_commit, p, num_frozen_tokens, voice_sha, persona, digest_sha, stage,
-step}`; tensor names `<group>.keys.<layer>`, `<group>.values.<layer>`.
+**Backend protocol, `Frames`, `Cartridge`, registry (from #19, shipped in
+#23)**: as written in section 4b, plus the types 4b names without defining,
+all in `voice/src/voice/backends/base.py`: `StreamSpec(name, role, kind,
+vocab, dim)`, `KVGroup(keys, values, num_frozen)` (first `num_frozen`
+positions are buffers, the rest fp32 parameters), `GMMParams(locs, scales,
+weights)`, `LossWeights(streams, default=1.0, extra)` with `.of(stream)`,
+`Targets(topk_ids, topk_logprobs)` per stream `[T, k]` built with
+`Targets.from_rows(rows)` (rejects frame gaps), `Server` (`url`),
+`BackendSpec.hash`, and `Dialogue` (fields of `dialogue.jsonl`, wavs as
+paths; #10 may move it to `data.py` and re-export). `BackendConfig` also
+accepts `"fake"` (CPU test double used by the tests and `voice train
+--dry-run`). `forward` takes no checkpointing flag; a backend enables it
+itself. `cartridge.json`: `{backend, spec_hash, base_model, fork_commit, p,
+num_frozen_tokens, voice_sha, persona, digest_sha, stage, step}`, one
+`num_frozen_tokens` for all groups; tensor names `<group>.keys.<layer>`,
+`<group>.values.<layer>`. Adding a backend: `backends/<name>.py` with
+`@register("<name>")`, a `<Name>Config` in the `BackendConfig` union and
+`NAMES`, an import in `backends/__init__.py`.
+
+**Alignment (binding for #8, #13, #18):** logits at position t predict
+frame t+1 (next-frame). A target row with `frame = t` holds the teacher's
+distribution at position t, so it also predicts frame t+1. `sft_loss` pairs
+`logits[:, :-1]` with `tokens[1:]`; `distill_loss` pairs `logits[:, t]` with
+target row t.
 
 **PersonaPlex backend (from #8)** and **hertz-dev backend (from #18)**:
 each implements every `DuplexBackend` method for its model, with a parity
@@ -480,8 +514,13 @@ bf16) on 10 dialogues.
 passages.jsonl: {passage_id, entry_date (YYYY-MM-DD), pages [int], text, topic (sexuality|anger|other), borderline (bool)}
 dialogue.jsonl: {id, family (story|change|idea|author), split, question, response_text,
                  passage_ids [str], coverage (float), user_wav, agent_wav, words [{w, start_s, end_s}]}
-frames/<id>.safetensors: user_audio int16 [T,8], agent_text int32 [T], agent_audio int16 [T,8]
+frames/<backend>/<id>.safetensors: Frames.save layout, keys tokens.<stream> [T] and latents.<stream> [T, D],
+                                   meta as JSON metadata
 ```
+**Frames layout (coordinator decision, settles #19's open question 4):**
+every discrete stream is its own `[T]` tensor, as in 4b's `Frames.tokens`.
+PersonaPlex's 8 Mimi codebooks per channel are 8 streams, not one `[T, 8]`
+tensor, so 17 token streams total. #8 names them in its `BackendSpec`.
 `agent_wav` is the author's-TTS render of `response_text`; `words` are its
 Phonon-2 word timestamps (`phonon transcribe --json`). `frames/` is per backend
 (`frames/personaplex/<id>.safetensors`, `frames/hertz/<id>.safetensors`),
@@ -495,6 +534,9 @@ and `borderline == false` passages appear in any dialogue.
 ```
 parquet shard: id, frame, stream (name), topk_ids int32[20], topk_logprobs float32[20]
 ```
+One row per (id, frame, stream); `shared.targets` does not hard-code k, and
+the voice project uses k = 20. Alignment as stated under the backend
+protocol above.
 The backend's own model with the source passages in context (PersonaPlex:
 `<system>` text; hertz: Pocket TTS audio of the passages on the agent
 channel before the question), teacher-forced on the dialogue's frames;
