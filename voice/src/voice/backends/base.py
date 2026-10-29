@@ -12,6 +12,13 @@ Shapes (T = frames of one dialogue at `spec.frame_rate_hz`, p = prefix frames):
     Targets.topk_*[stream]   [T, k]       stored teacher top-k for frame t
     KVGroup.keys[l]          [1, H, p, D] per layer; the prefix axis is dim 2
 
+Alignment, one convention for every backend and both losses: position t of
+`Outputs` is the model's prediction *for frame t*, computed from frames < t
+(and the prefix); `Targets[t]` is the teacher's distribution for frame t. So
+`sft_loss` scores logits[:, t] against tokens[t] and `distill_loss` pairs
+logits[:, t] with Targets[t]. A backend whose native head predicts t+1 from
+position t shifts inside `forward`, not in the losses.
+
 A `Cartridge` is the trainable prefix: one `KVGroup` per name in
 `spec.cache_groups` (PersonaPlex: "temporal"; hertz: "lm", "resyn"). The first
 `num_frozen` prefix positions of every group are buffers (the attention sink);

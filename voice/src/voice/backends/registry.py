@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 
 
 class BackendConfigBase(BaseModel):
-    checkpoint: str = ""  # HF id or volume path
+    checkpoint: str  # HF id or volume path
     p: int = 1024  # prefix frames
     device: str = "cuda"
 
@@ -30,6 +30,7 @@ class HertzConfig(BackendConfigBase):
 
 class FakeConfig(BackendConfigBase):
     name: Literal["fake"] = "fake"
+    checkpoint: str = ""  # no weights
     p: int = 4
     device: str = "cpu"
     vocab: int = 8

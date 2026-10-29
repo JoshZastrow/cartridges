@@ -17,13 +17,15 @@ def test_get_rejects_unknown_and_mismatched():
     with pytest.raises(KeyError, match="unknown backend"):
         backends.get("nope")
     with pytest.raises(ValueError, match="not 'fake'"):
-        backends.get("fake", PersonaPlexConfig())
+        backends.get("fake", PersonaPlexConfig(checkpoint="nvidia/personaplex-7b-v1"))
 
 
 def test_config_is_discriminated_on_name():
-    assert isinstance(parse_config({"name": "personaplex"}), PersonaPlexConfig)
+    pp = parse_config({"name": "personaplex", "checkpoint": "nvidia/personaplex-7b-v1"})
     h = parse_config({"name": "hertz", "checkpoint": "/vol/x.pt"})
-    assert isinstance(h, HertzConfig) and h.p == 512 and PersonaPlexConfig().p == 1024
+    assert isinstance(pp, PersonaPlexConfig) and pp.p == 1024 and isinstance(h, HertzConfig) and h.p == 512
+    with pytest.raises(ValueError):
+        parse_config({"name": "personaplex"})  # checkpoint is required
     with pytest.raises(ValueError):
         parse_config({"name": "moshi"})
 

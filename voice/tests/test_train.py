@@ -3,7 +3,7 @@
 import pytest
 import torch
 from shared.targets import TargetRow, write_shard
-from voice.backends.base import Cartridge, Frames
+from voice.backends.base import Cartridge, Frames, LossWeights, Targets
 from voice.backends.fake import FakeBackend, fixture, kl_to_topk
 from voice.backends.registry import FakeConfig
 from voice.train import TrainConfig, load_targets, train, validate
@@ -71,6 +71,21 @@ def test_distillation_term_uses_stored_targets(tmp_path, data):
     assert val["distill"] > 0 and val["total"] == pytest.approx(val["agent"] + 0.5 * val["distill"], rel=1e-5)
 
 
+def test_sft_and_distill_losses_share_one_alignment(tmp_path):
+    """A teacher putting all mass on the true frame t makes the distill loss at
+    position t equal the SFT cross-entropy at position t."""
+    backend = FakeBackend(FakeConfig())
+    frames = Frames.load(fixture(tmp_path, n=1)[0])
+    with torch.no_grad():
+        out = backend.forward(frames, backend.cartridge_from_prefill(backend.build_prefix(None, "", "")))
+    agent = frames.tokens["agent"]
+    targets = Targets(topk_ids={"agent": agent[:, None]}, topk_logprobs={"agent": torch.zeros(len(agent), 1)})
+    sft = backend.sft_loss(out, frames, LossWeights())["agent"]
+    assert float(backend.distill_loss(out, targets)) == pytest.approx(float(sft), rel=1e-6)
+    shifted = Targets(topk_ids={"agent": agent.roll(-1)[:, None]}, topk_logprobs=targets.topk_logprobs)
+    assert float(backend.distill_loss(out, shifted)) != pytest.approx(float(sft), rel=1e-3)
+
+
 def test_kl_to_topk_is_zero_when_student_matches():
     logits = torch.tensor([[2.0, 0.0, -1.0]])
     ids = torch.tensor([[0, 1]])
@@ -78,7 +93,7 @@ def test_kl_to_topk_is_zero_when_student_matches():
 
 
 def test_cli_dry_run_exits_zero(tmp_path):
-    (tmp_path / "c.toml").write_text('[backend]\nname = "personaplex"\n\nlr = 0.05\n')
+    (tmp_path / "c.toml").write_text('lr = 0.05\n\n[backend]\nname = "personaplex"\ncheckpoint = "nvidia/personaplex-7b-v1"\n')
     assert cli.main(["train", "--config", str(tmp_path / "c.toml"), "--dry-run"]) == 0
     assert cli.main(["train", "--dry-run"]) == 0
 

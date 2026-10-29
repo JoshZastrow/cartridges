@@ -48,7 +48,7 @@ DATA_MOUNT = "/data"
 class TrainConfig(BaseModel):
     backend: BackendConfig = Field(default_factory=FakeConfig)
     stage: Literal["sft", "onpolicy", "ablation"] = "sft"
-    system: str = "cartridge"  # W&B run name <backend>/<system>/<stage>
+    system: str = "voice-cartridge"  # W&B run name <backend>/<system>/<stage>
     group: str = ""  # exp-YYYYMMDD-<slug>; default group_name(stage)
 
     train_frames: list[str] = []  # Frames files, or directories of *.safetensors
@@ -70,7 +70,7 @@ class TrainConfig(BaseModel):
     val_every: int = 100
     patience: int = 3
     seed: int = 0
-    out_dir: str = "outputs/voice-train"
+    out_dir: str = "outputs/voice-train"  # on Modal, a relative out_dir lands under /data
     gpu: str | None = None  # Modal gpu= for cost accounting; detected when None
 
 
@@ -261,12 +261,15 @@ data_volume = modal.Volume.from_name("voice-data", create_if_missing=True)
 )
 def train_remote(config: dict, git: dict) -> dict:
     os.environ.update(git)
-    result = train(TrainConfig.model_validate(config))
+    cfg = TrainConfig.model_validate(config)
+    if not cfg.out_dir.startswith("/"):  # keep the best dir on the Volume, not the container disk
+        cfg = cfg.model_copy(update={"out_dir": f"{DATA_MOUNT}/{cfg.out_dir}"})
+    result = train(cfg)
     data_volume.commit()
     return result
 
 
 def launch(cfg: TrainConfig) -> dict:
-    """Run `train` on Modal (gpu="H200"); out_dir should be under /data."""
+    """Run `train` on Modal (gpu="H200"); a relative out_dir is placed under /data."""
     with modal.enable_output(), app.run():
         return train_remote.remote(cfg.model_dump(mode="json"), tracking.modal_env())

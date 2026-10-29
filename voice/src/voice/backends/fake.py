@@ -4,8 +4,8 @@ Streams `user` and `agent` (vocab `config.vocab`), one cache group "temporal"
 with one layer, K/V [1, 1, p, dim]. The frozen "model" is a seeded embedding,
 one causal attention layer over [prefix; frames] and an output head, so
 `forward` is differentiable w.r.t. the cartridge and training it lowers the
-loss. Position t of `agent` logits predicts agent token t+1 (the last position
-is dropped by the loss).
+loss. Alignment as in base.py: the input is shifted right by one frame, so
+logits position t sees frames < t and predicts agent frame t.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from voice.backends.registry import FakeConfig, register
 def kl_to_topk(logits: Tensor, topk_ids: Tensor, topk_logprobs: Tensor) -> Tensor:
     """KL(teacher || student) over the teacher's top-k entries, mean over
     positions, as `cartridges.cartridge.train_distill.distill_loss` computes it.
-    logits [T, V], topk_* [T, k]."""
+    logits [T, V], topk_* [T, k]; row t of each is frame t (base.py alignment)."""
     student = logits.float().log_softmax(-1).gather(-1, topk_ids)
     return (topk_logprobs.exp() * (topk_logprobs - student)).sum(-1).mean()
 
@@ -84,6 +84,7 @@ class FakeBackend:
 
     def forward(self, frames: Frames, cartridge: Cartridge | None) -> Outputs:
         x = self._x(frames)  # [T, d]
+        x = torch.cat([torch.zeros_like(x[:1]), x[:-1]])  # position t sees frames < t
         q, k, v = x @ self.wq, x @ self.wk, x @ self.wv
         t, p = len(x), 0
         if cartridge is not None:
@@ -95,8 +96,7 @@ class FakeBackend:
         return Outputs(logits={"agent": ((x + h) @ self.head)[None]})
 
     def sft_loss(self, out: Outputs, frames: Frames, w: LossWeights) -> dict[str, Tensor]:
-        logits, target = out.logits["agent"][0, :-1], frames.tokens["agent"][1:]
-        return {"agent": w.of("agent") * F.cross_entropy(logits, target)}
+        return {"agent": w.of("agent") * F.cross_entropy(out.logits["agent"][0], frames.tokens["agent"])}
 
     def distill_loss(self, out: Outputs, targets: Targets) -> Tensor:
         return kl_to_topk(out.logits["agent"][0], targets.topk_ids["agent"], targets.topk_logprobs["agent"])
