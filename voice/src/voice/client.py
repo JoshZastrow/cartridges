@@ -18,10 +18,14 @@ after the WAV the client keeps sending silence until `max_s`, so the agent can
 finish. The agent wav is laid on the same timeline as the user wav: each
 received chunk starts at the sample of its arrival time, or right after the
 previous chunk if that is later (what a playback buffer does). So agent onset
-minus user offset in the two wavs is the latency a listener hears. It
-includes the transport: for moshi, sphn's Ogg/Opus reader holds 3 frames
-(240 ms) before its first PCM, once on the server and once here, so ~0.48 s
-of it is not the model.
+minus user offset in the two wavs is the latency a listener hears, transport
+included. `Conversation.transport_s` is the transport's share, measured per
+conversation as the sum of
+    send_hold_s           median(page left - PCM due) of the user's Opus pages
+    server_decode_hold_s  the transport's `codec_hold_s`: the server's Opus reader
+                          holds that long before its first PCM (a constant of the
+                          pinned sphn, asserted in tests/test_client.py)
+    client_decode_hold_s  first decoded agent PCM - first raw agent audio message
 
     python -m voice.client smoke --url <ws-url> --prompts <dir of wavs> --out outputs/smoke
 """
@@ -52,8 +56,12 @@ class Conversation(Dialogue):
     max_s: float = 0.0
     user_s: float = 0.0  # length of the user wav before the silence tail
     handshake_s: float = 0.0  # connect -> server ready (system prompt; cold start on a cold app)
-    chunks: list[tuple[float, int]] = []  # (arrival_s, samples) per received agent chunk
+    chunks: list[tuple[float, int]] = []  # (arrival_s, samples) per decoded agent chunk
+    wire: list[tuple[float, int]] = []  # (arrival_s, bytes) per raw agent audio message, before decoding
+    sent: list[tuple[float, float, int]] = []  # (due_s, left_s, bytes) per user chunk; 0 bytes if the encoder held it
     text: list[tuple[float, str]] = []  # (arrival_s, piece) of the agent text stream, if the backend has one
+    transport: dict[str, float | None] = {}  # send_hold_s, server_decode_hold_s, client_decode_hold_s
+    transport_s: float | None = None  # their sum: the transport's share of any latency measured on the wavs
 
     @property
     def first_audio_s(self) -> float | None:
@@ -65,10 +73,12 @@ class Transport(Protocol):
 
     sample_rate: int
     frame_size: int  # samples per user chunk, sent every frame_size / sample_rate s
+    codec_hold_s: float  # how long the server's decoder holds user audio before its first PCM
 
     async def connect(self, session, url: str) -> None: ...  # returns once the server takes audio
-    async def send(self, pcm: np.ndarray) -> None: ...  # one float32 chunk of frame_size samples
-    def received(self) -> AsyncIterator[tuple[str, np.ndarray | str]]: ...  # ("audio", pcm) | ("text", str)
+    async def send(self, pcm: np.ndarray) -> int: ...  # one float32 chunk of frame_size samples; bytes put on the wire
+    # ("wire", n_bytes) for each raw agent audio message as it arrives, then ("audio", pcm) once decoded; ("text", str)
+    def received(self) -> AsyncIterator[tuple[str, np.ndarray | str | int]]: ...
     async def close(self) -> None: ...
 
 
@@ -77,6 +87,8 @@ class MoshiTransport:
 
     sample_rate = 24000
     frame_size = 1920
+    OPUS_HOLD_FRAMES = 3  # sphn 0.1.12's OpusStreamReader: first PCM after the 4th page (tests/test_client.py)
+    codec_hold_s = OPUS_HOLD_FRAMES * frame_size / sample_rate  # 0.24 s
     HANDSHAKE, AUDIO, TEXT = 0, 1, 2
 
     def __init__(self, connect_timeout_s: float = 1500.0):
@@ -91,12 +103,13 @@ class MoshiTransport:
         if first[:1] != bytes([self.HANDSHAKE]):
             raise RuntimeError(f"expected the handshake byte, got {first[:8]!r}")
 
-    async def send(self, pcm: np.ndarray) -> None:
+    async def send(self, pcm: np.ndarray) -> int:
         self.writer.append_pcm(pcm)
         if msg := self.writer.read_bytes():
             await self.ws.send_bytes(bytes([self.AUDIO]) + msg)
+        return len(msg)
 
-    async def received(self) -> AsyncIterator[tuple[str, np.ndarray | str]]:
+    async def received(self) -> AsyncIterator[tuple[str, np.ndarray | str | int]]:
         import aiohttp
 
         async for message in self.ws:
@@ -104,6 +117,7 @@ class MoshiTransport:
                 continue
             kind, payload = message.data[0], message.data[1:]
             if kind == self.AUDIO:
+                yield "wire", len(payload)
                 self.reader.append_bytes(payload)
                 pcm = self.reader.read_pcm()
                 if pcm.shape[-1]:
@@ -166,6 +180,8 @@ class Client:
         padded[: min(len(user), len(padded))] = user[: len(padded)]
         id = id or (Path(user_wav).stem if isinstance(user_wav, (str, Path)) else f"conv-{int(time.time())}")
         received: list[tuple[float, np.ndarray]] = []
+        wire: list[tuple[float, int]] = []
+        sent: list[tuple[float, float, int]] = []
         text: list[tuple[float, str]] = []
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
@@ -176,25 +192,40 @@ class Client:
 
             async def send():
                 for n in range(n_frames):
-                    await asyncio.sleep(max(0.0, t0 + n * size / sr - time.monotonic()))
-                    await tr.send(padded[n * size:(n + 1) * size])
+                    due = n * size / sr
+                    await asyncio.sleep(max(0.0, t0 + due - time.monotonic()))
+                    n_bytes = await tr.send(padded[n * size:(n + 1) * size])
+                    sent.append((due, time.monotonic() - t0, n_bytes))
                 await asyncio.sleep(self.drain_s)
                 await tr.close()
 
             async def recv():
+                log = {"audio": received, "wire": wire, "text": text}
                 async for kind, item in tr.received():
-                    (received if kind == "audio" else text).append((time.monotonic() - t0, item))
+                    log[kind].append((time.monotonic() - t0, item))
 
             await asyncio.gather(send(), recv())
 
         user_path, agent_path = self.out_dir / f"{id}.user.wav", self.out_dir / f"{id}.agent.wav"
         write_wav(user_path, padded, sr)
         write_wav(agent_path, place(received, len(padded), sr), sr)
+        transport = transport_split(sent, wire, received, tr.codec_hold_s)
         return Conversation(
             id=id, user_wav=str(user_path), agent_wav=str(agent_path), response_text="".join(p for _, p in text).strip(),
             url=self.url, sample_rate=sr, max_s=max_s, user_s=len(user) / sr, handshake_s=handshake_s,
-            chunks=[(t, len(p)) for t, p in received], text=text,
+            chunks=[(t, len(p)) for t, p in received], wire=wire, sent=sent, text=text, transport=transport,
+            transport_s=None if None in transport.values() else sum(transport.values()),
         )
+
+
+def transport_split(sent, wire, received, codec_hold_s: float) -> dict[str, float | None]:
+    """The transport's share of latency, in seconds, from one conversation's logs (module docstring)."""
+    holds = [left - due for due, left, n in sent if n > 0]
+    return {
+        "send_hold_s": float(np.median(holds)) if holds else None,
+        "server_decode_hold_s": codec_hold_s,
+        "client_decode_hold_s": received[0][0] - wire[0][0] if received and wire else None,
+    }
 
 
 def write_wav(path: Path, pcm: np.ndarray, sample_rate: int) -> None:
@@ -235,8 +266,12 @@ def smoke(url: str, backend: str, prompts: list[str], out_dir: str, max_s: float
         user_s = soundfile.info(wav).duration
         c = client.converse(wav, max_s=max(max_s, user_s + tail_s))
         tr = transcribe(c.agent_wav)
+        latency = response_latency(c, tr["words"])
         rows.append({"id": c.id, "user_s": c.user_s, "handshake_s": c.handshake_s,
-                     "first_audio_s": c.first_audio_s, "latency_s": response_latency(c, tr["words"]),
+                     "first_audio_s": c.first_audio_s, "latency_s": latency, "transport_s": c.transport_s,
+                     **c.transport,
+                     "latency_minus_transport_s": None if latency is None or c.transport_s is None
+                     else latency - c.transport_s,
                      "text_stream": c.response_text, "transcript": tr["text"], "agent_wav": c.agent_wav})
         logger.info("%d/%d %s", i + 1, len(prompts), json.dumps(rows[-1]))
     Path(out_dir, "smoke.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -255,7 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-s", type=float, default=20.0)
     s.add_argument("--limit", type=int, default=10)
     s.add_argument("--group", default="", help="W&B group exp-YYYYMMDD-<slug>; empty: no W&B run")
-    s.add_argument("--name", default="personaplex/stock/serve-smoke", help="W&B run name <backend>/<system>/<stage>")
+    s.add_argument("--name", default="personaplex/stock/eval-smoke", help="W&B run name <backend>/<system>/<stage>")
     args = p.parse_args(argv)
     src = Path(args.prompts)
     wavs = sorted(str(x) for x in src.glob("*.wav")) if src.is_dir() else [str(src)]
@@ -267,18 +302,25 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def log_smoke(rows: list[dict], args) -> None:
-    """One W&B run in project `voice`: the per-prompt table and the latency summary."""
+    """One W&B run in project `voice`: the per-prompt table and the latency summary.
+    Tagged `serve-check`, not `baseline`, and summarised under `smoke/`, so the
+    report never mixes it with #9's section 8 metrics."""
     import wandb
 
     from shared import tracking
 
     with tracking.start_run("voice", args.group, vars(args), name=args.name, job_type="eval", gpu="CPU",
-                            tags=["baseline", args.backend]) as run:
+                            tags=["serve-check", args.backend]) as run:
         cols = list(rows[0])
         run.log({"smoke/prompts": wandb.Table(columns=cols, data=[[r[c] for c in cols] for r in rows])})
-        lat = [r["latency_s"] for r in rows if r["latency_s"] is not None]
-        run.summary.update({"responsiveness/latency_s": float(np.median(lat)) if lat else None,
-                            "smoke/answered": len(lat), "smoke/n": len(rows),
+        def median(key):
+            xs = [r[key] for r in rows if r[key] is not None]
+            return float(np.median(xs)) if xs else None
+
+        run.summary.update({f"smoke/{k}": median(k) for k in (
+            "latency_s", "transport_s", "send_hold_s", "server_decode_hold_s", "client_decode_hold_s",
+            "latency_minus_transport_s")})
+        run.summary.update({"smoke/answered": sum(r["latency_s"] is not None for r in rows), "smoke/n": len(rows),
                             "smoke/handshake_s_first": rows[0]["handshake_s"]})
 
 

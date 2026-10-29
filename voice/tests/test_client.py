@@ -82,11 +82,15 @@ def test_converse_round_trips_in_real_time_on_one_timeline(tmp_path):
     user, sr = soundfile.read(c.user_wav)
     agent, _ = soundfile.read(c.agent_wav)
     assert sr == SAMPLE_RATE and len(user) == len(agent) == round(max_s / 0.08) * FRAME_SIZE
-    # the echo comes back after the user's tone: each sphn Opus reader holds 3 frames
-    # (240 ms) and there is one per direction, so ~0.48 s of any measured latency is transport
-    assert 0.4 <= onset_s(agent) - onset_s(user) < 0.7
+    # the echo server adds no model time, so the measured transport split explains the whole delay
+    delay = onset_s(agent) - onset_s(user)
+    assert c.transport["server_decode_hold_s"] == MoshiTransport.codec_hold_s
+    assert 0 <= c.transport["send_hold_s"] < 0.05 and 0.15 < c.transport["client_decode_hold_s"] < 0.4
+    assert c.transport_s == pytest.approx(delay, abs=0.12)
     arrivals = [t for t, _ in c.chunks]
     assert arrivals == sorted(arrivals) and c.first_audio_s == arrivals[0]
+    assert c.wire and c.wire[0][0] <= c.first_audio_s and all(n > 0 for _, n in c.wire)
+    assert len(c.sent) == round(max_s / 0.08) and all(left >= due for due, left, _ in c.sent)
     assert c.response_text.startswith("hi hi") and len(c.text) >= 10
 
 
@@ -109,3 +113,19 @@ def test_cli_deploy_dry_run_prints_the_stock_url_without_modal(capsys):
     out = capsys.readouterr().out.strip()
     assert out.startswith("wss://") and out.endswith("/api/chat?voice_prompt=NATF2.pt&text_prompt=You+enjoy+having+a+good+conversation.")
     assert cli.main(["deploy", "--backend", "personaplex", "--system", "voice-cartridge:v0", "--dry-run"]) == 2
+
+
+def test_sphn_opus_holds_exactly_the_pinned_frames():
+    """The server-side share of transport_s is a constant of the pinned sphn: its
+    OpusStreamWriter emits a page on every 80 ms chunk (no encode hold) and its
+    OpusStreamReader returns no PCM until OPUS_HOLD_FRAMES pages later."""
+    writer, reader = sphn.OpusStreamWriter(SAMPLE_RATE), sphn.OpusStreamReader(SAMPLE_RATE)
+    pcm = tone(2.0, 0.0, 2.0)
+    out = 0
+    for k in range(1, len(pcm) // FRAME_SIZE + 1):
+        writer.append_pcm(pcm[(k - 1) * FRAME_SIZE:k * FRAME_SIZE])
+        page = writer.read_bytes()
+        assert page, f"writer held chunk {k}"
+        reader.append_bytes(page)
+        out += reader.read_pcm().shape[-1]
+        assert out == max(0, k - MoshiTransport.OPUS_HOLD_FRAMES) * FRAME_SIZE, k
