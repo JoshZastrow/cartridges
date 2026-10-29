@@ -82,13 +82,17 @@ def text_of(content: str | list[dict[str, Any]] | None) -> str:
     return content or ""
 
 
-def clean_messages(messages: list[ChatMessage]) -> list[dict]:
-    """Pass the client's messages through; drop empty system turns."""
-    return [
+def clean_messages(messages: list[ChatMessage], system: str | None = None) -> list[dict]:
+    """Pass the client's messages through; drop empty system turns, then open
+    with `system` (the model's default system turn) if no system turn is left."""
+    out = [
         m.model_dump(mode="json")
         for m in messages
         if not (m.role == "system" and not text_of(m.content).strip())
     ]
+    if system and not any(m["role"] == "system" for m in out):
+        out.insert(0, {"role": "system", "content": system})
+    return out
 
 
 def mock_generate(messages: list[dict]) -> dict:
@@ -114,6 +118,8 @@ def build_app(
     call_timeout_s: float = CALL_TIMEOUT_S,
     teacher_stream: Callable | None = None,
     cartridge_stream: Callable | None = None,
+    cartridge_vllm_generate: Callable | None = None,
+    cartridge_vllm_stream: Callable | None = None,
 ):
     """The public API. `teacher_generate(model_id, with_context, messages,
     max_tokens, temperature)` and `cartridge_generate(cartridge, messages,
@@ -121,7 +127,9 @@ def build_app(
     tests). A model with a `gpu` also gets `gpu=` (cartridge backend).
     `teacher_stream` and `cartridge_stream` (same arguments) return an iterator
     of {text, tokens} events and a final {finish_reason, prompt_tokens,
-    completion_tokens}; without them `stream: true` chunks the finished text."""
+    completion_tokens}; without them `stream: true` chunks the finished text.
+    `cartridge_vllm_generate` and `cartridge_vllm_stream` (model_id, cartridge,
+    messages, max_tokens, temperature) serve the cartridge-vllm backend."""
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
     from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -140,17 +148,23 @@ def build_app(
     def call_backend(model: ChatModel, messages: list[dict], request: ChatRequest) -> dict:
         if model.backend == "teacher":
             return teacher_generate(model.model_id, model.with_context, messages, request.max_tokens, request.temperature)
+        if model.backend == "cartridge-vllm":
+            return cartridge_vllm_generate(model.model_id, model.cartridge, messages, request.max_tokens,
+                                           request.temperature)
         return cartridge_generate(model.cartridge, messages, request.max_tokens, request.temperature,
                                   **({"gpu": model.gpu} if model.gpu else {}))
 
     def stream_events(model: ChatModel, messages: list[dict], request: ChatRequest):
         if model.backend == "teacher":
             return teacher_stream(model.model_id, model.with_context, messages, request.max_tokens, request.temperature)
+        if model.backend == "cartridge-vllm":
+            return cartridge_vllm_stream(model.model_id, model.cartridge, messages, request.max_tokens,
+                                         request.temperature)
         return cartridge_stream(model.cartridge, messages, request.max_tokens, request.temperature,
                                 **({"gpu": model.gpu} if model.gpu else {}))
 
     async def generate(model: ChatModel, request: ChatRequest) -> tuple[str, str | None, Usage]:
-        messages = clean_messages(request.messages)
+        messages = clean_messages(request.messages, model.system)
         if model.backend == "mock":
             result = mock_generate(messages)
         else:
@@ -198,7 +212,7 @@ def build_app(
         """The backend's events as chunks, each as it arrives (the blocking
         Modal generator runs in a thread and feeds a queue)."""
         loop, queue, end = asyncio.get_running_loop(), asyncio.Queue(), object()
-        messages = clean_messages(request.messages)
+        messages = clean_messages(request.messages, model.system)
 
         def pump() -> None:
             try:
@@ -234,7 +248,8 @@ def build_app(
         if model is None:
             raise HTTPException(status_code=404, detail=f"model not found: {request.model}")
         request_id, created = f"chatcmpl-{uuid.uuid4().hex[:24]}", int(time.time())
-        live = {"teacher": teacher_stream, "cartridge": cartridge_stream}.get(model.backend)
+        live = {"teacher": teacher_stream, "cartridge": cartridge_stream,
+                "cartridge-vllm": cartridge_vllm_stream}.get(model.backend)
         if request.stream and live is not None:
             return StreamingResponse(live_stream(request_id, created, model, request), media_type="text/event-stream")
         text, finish_reason, usage = await generate(model, request)

@@ -252,7 +252,7 @@ class Cli:
     def gateway_serve(self, port: int = 8008, host: str = "127.0.0.1") -> None:
         """Run the OpenAI-compatible chat gateway for LibreChat (serve/gateway.py).
         Bearer key from GATEWAY_API_KEY (default cartridges-local). Backend calls
-        go to the deployed Modal Teacher and CartridgeServer."""
+        go to the deployed Modal Teacher, CartridgeServer and CartridgeEngine."""
         import os
 
         import uvicorn
@@ -266,6 +266,8 @@ class Cli:
             api_key=os.environ.get("GATEWAY_API_KEY", DEFAULT_API_KEY),
             teacher_stream=backends.teacher_stream,
             cartridge_stream=backends.cartridge_stream,
+            cartridge_vllm_generate=backends.cartridge_vllm_generate,
+            cartridge_vllm_stream=backends.cartridge_vllm_stream,
         )
         uvicorn.run(web, host=host, port=port)
 
@@ -589,6 +591,14 @@ class Cli:
         from cartridges.cartridge.ask import run
 
         _print_json(run(question, cartridge, max_new_tokens))
+
+    def cartridge_export_vllm(self, cartridge: str, revision: str = "main") -> None:
+        """Export a cartridge on the volume (/vol/cartridges/<group>/<name>) for
+        the vLLM CartridgeEngine (cartridge/export_vllm.py), on a CPU Modal
+        container; prints the manifest. Re-run after retraining."""
+        from cartridges.cartridge.export_vllm import run
+
+        _print_json(run(cartridge, revision))
 
     def tasks_init(self, corpus: str = TASKS_CORPUS, heldout: str = TASKS_HELDOUT) -> None:
         """Create the Task Store schema `cartridge` in DATABASE_URL (idempotent)
