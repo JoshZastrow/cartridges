@@ -310,7 +310,9 @@ set by the issues before it.
     baseline it is compared to.
   - *Run names*: `<backend>/<system>/<stage>` where system is `stock` or a
     cartridge artifact name, stage is `eval-smoke`, `eval-full`, `sft`,
-    `onpolicy`, `ablation`, `lora`; tags `baseline` or `candidate`, and the
+    `onpolicy`, `ablation`, `lora`, or `serve-smoke` (a deployment check
+    on non-evalset prompts, never reported); tags `baseline` or
+    `candidate` for evalset runs only, `check` for `serve-smoke`, and the
     backend name.
   - *Every eval run logs*: config (backend, checkpoint or artifact and
     version, `voice-evalset` version, seeds, judge model and rubric hash,
