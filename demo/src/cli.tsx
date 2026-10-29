@@ -2,7 +2,7 @@
 // gateway (`uv run cartridges gateway_serve`), each pane streams its tokens and
 // shows time to first token, decode tokens/s and total time.
 //
-//   npm start -- [--url http://127.0.0.1:8008] [--max-tokens 512] [--prompt "..."] [--no-warmup]
+//   npm start -- [--url http://127.0.0.1:8008] [--max-tokens 1024] [--prompt "..."] [--no-warmup]
 //                [--cartridge journal-cartridge-27b-am]   (the cartridge on HF decode instead of vLLM)
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -26,7 +26,7 @@ function arg(name: string, fallback: string): string {
 const config = {
   url: arg("url", "http://127.0.0.1:8008"),
   apiKey: arg("key", process.env.GATEWAY_API_KEY ?? "cartridges-local"),
-  maxTokens: Number(arg("max-tokens", "512")),
+  maxTokens: Number(arg("max-tokens", "1024")),
   temperature: Number(arg("temperature", "0")), // greedy on both sides
   prompt: arg("prompt", ""),
   warmup: !process.argv.includes("--no-warmup"),
