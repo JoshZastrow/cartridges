@@ -551,8 +551,23 @@ discrete agent stream only (`agent_text` / `agent` FSQ). Written with
 **Client and deploy (from #20, #21)**
 ```
 uv run voice deploy --backend personaplex|hertz --system stock|<cartridge artifact>   # Modal app voice-serve; prints the WebSocket URL
-voice.client.Client(url).converse(user_wav, max_s) -> Dialogue                        # real-time chunks in, agent audio + timestamps out
+uv run voice serve-local --backend <name> [--port 8998]
+voice.client.Client(url).converse(user_wav, max_s, id=None) -> Conversation           # Conversation extends Dialogue
+voice.client.Transport (Protocol): codec_hold_s; connect(session, url); send(pcm) -> bytes;
+                                   received() yields ("wire", n) before decode, then ("audio", pcm) / text
+voice.client.TRANSPORTS[backend]   # "personaplex": MoshiTransport; #21 adds "hertz": HertzTransport
+voice.client.auth_headers(url)     # proxy token only for <MODAL_WORKSPACE>--*.modal.run
 ```
+Shipped in #24: `Conversation.transport_s` = send hold + server decode hold
+(`codec_hold_s`, 0.24 s for sphn 0.1.12) + client decode hold, so model
+latency is reported as `latency_s − transport_s`; measure latency from the
+user's last Phonon-2 word, not the end of the wav. Endpoints require Modal
+proxy auth: the client reads `MODAL_PROXY_TOKEN_ID` / `MODAL_PROXY_TOKEN_SECRET`
+and sends them only to our workspace's hosts. The stock voice is the
+per-connection `voice_prompt` (a bare `.pt`/`.wav` name, validated by
+`voice/src/voice/patches/personaplex_voice_prompt.py` in the server
+process); the default is `NATF2.pt`, and baselines pass the author's clip
+(#9 mounts `voice-voice`). Deployment checks log stage `serve-smoke`, tag `check`.
 
 **Eval set (from #22)**
 ```
