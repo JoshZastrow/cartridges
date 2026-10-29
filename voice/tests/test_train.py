@@ -102,7 +102,14 @@ def test_cli_dry_run_exits_zero(tmp_path):
     assert cli.main(["train", "--dry-run"]) == 0
 
 
-@pytest.mark.parametrize("command", ["encode", "eval", "report"])  # deploy: every backend is served
+@pytest.mark.parametrize("command", ["encode", "eval", "report"])
 def test_cli_stubs_take_backend(command, capsys):
     assert cli.main([command, "--backend", "hertz"]) == 2
     assert "not implemented yet" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("backend,path", [("hertz", "/audio"), ("personaplex", "/api/chat?")])
+def test_cli_deploy_takes_backend_dry_run(backend, path, capsys):
+    """Every backend is served now; --dry-run exercises the CLI path without reaching Modal."""
+    assert cli.main(["deploy", "--backend", backend, "--system", "stock", "--dry-run"]) == 0
+    assert path in capsys.readouterr().out
