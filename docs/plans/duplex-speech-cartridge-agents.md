@@ -167,7 +167,7 @@ promoted on eval numbers, not on loss.
 | Wave | Issues | Can run in parallel | Exit criterion |
 |---|---|---|---|
 | 0 | #19 bootstrap `voice/` and `shared/`, backend protocol, registry, generic trainer skeleton | alone | root tests unchanged; `voice train --dry-run` on a fake backend |
-| 1a | #20 PersonaPlex stock inference + serve + deploy + client · #21 hertz-dev stock inference + serve + deploy · #22 eval set artifact (smoke + full) | all three | two stock endpoints answer the client; `voice-evalset` v1 in W&B |
+| 1a | #20 PersonaPlex stock inference + serve + deploy + client · #21 hertz-dev stock inference + serve + deploy · #22 eval set artifact (smoke + full) | all three | two stock endpoints answer the client; the first `voice-evalset` version in W&B (`v0`) |
 | 1b | #9 eval harness and report against the endpoints (needs #20, #21, #22) | alone | **two baseline rows in W&B**, produced by `voice eval --size full` against `voice-serve`, plus the smoke eval under 10 min per system |
 | 2 | #8 PersonaPlex cartridge half + parity (needs #20) · #10 training data (needs #22) · #11 teacher study (needs #9, #10) | all three | step-0 cartridge equals the stock prompt; train dialogues on the volume |
 | 3 | #18 hertz-dev cartridge half + parity (needs #21, #8: one wave behind, so #8's lessons carry over) · #12 pinned cache + `voice deploy --system <cartridge>` (needs #8) · #13 teacher targets (needs #11, #10) | all three | a cartridge can be served and the full eval re-run against it |
@@ -572,6 +572,8 @@ process); the default is `NATF2.pt`, and baselines pass the author's clip
 **Eval set (from #22)**
 ```
 W&B artifact voice-evalset:v<N>: evalset.json {version, seeds, counts, hashes}, prompts/, baited/, timed/, fdb/, voice-eval/
+                                 # runs record W&B's version string (first: voice-evalset:v0);
+                                 # evalset.json `version` is the file-format version, not the artifact version
 ```
 
 **Eval CLI (from #9)**
