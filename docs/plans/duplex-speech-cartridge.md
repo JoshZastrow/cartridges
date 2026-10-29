@@ -1,55 +1,56 @@
 # A cartridge for a full-duplex speech model
 
 Status: research and technical requirements. Nothing here has run yet.
-Date: 2026-10-29.
+Date: 2026-10-29. The implementation contracts, waves and team protocol
+live in `docs/plans/duplex-speech-cartridge-agents.md` (the brief); this
+document holds the research, the requirements and the decisions.
 
 ## 0. Top-line answer
 
-**Feasible, on one of the three named models.** NVIDIA PersonaPlex (7B, Moshi
-architecture) conditions on a *voice sample* and a *persona text* by placing
-both as ordinary frames at the start of its single token stream. They sit in
-the same causal KV cache as the dialogue. That prefix is exactly the slot our
-cartridge fills: we can replace it with a trained KV prefix, initialised from
-a prefill of your own voice clip plus a persona text, and train it with
-self-study the way we train the journal cartridge today.
+**Feasible, on two open models, trained in parallel behind one interface.**
 
-The other two named models are not viable targets:
+The goal is a trained KV-cache prefix (a cartridge) that makes a full-duplex
+speech model **talk as the author**: in the author's voice and prosody, in
+the author's diction, in the first person, retelling the author's own
+journal sentences near-verbatim. Asked "how have you been feeling lately?",
+it tells the story from the most recent entry in the author's words; asked
+"how have you changed over the years?", it contrasts what the author wrote
+in 2024 with what the author wrote recently. It never speaks about
+sexuality or anger. This is not the text cartridge's job (answer facts
+*about* the author); it is a conversational self-portrait, distilled from
+the journal by self-study with the base model frozen.
 
-| Model | Verdict | Reason |
+Of the three models first named, only **PersonaPlex 7B** is viable; of the
+textless models closest to the Dessa profile, only **hertz-dev** has usable
+weights. Both are targets:
+
+| Model | Verdict | Why |
 |---|---|---|
-| **PersonaPlex 7B** (nvidia/personaplex-7b-v1) | **Go** | Pure-attention 7B temporal transformer, standard causal ring KV cache, voice + persona already supplied as a stream prefix, open weights (NVIDIA Open Model License), PyTorch inference code, ~17 GB VRAM steady. No training code, so we write the trainer. |
-| NemotronLabs VoiceChat 11B | No | Backbone is Nemotron-Nano-9B (NemotronH hybrid: 27 Mamba2 / 4 attention layers), so a "cache" is mostly SSM state, not KV. The TTS head is *voice-locked* (the audio-prompt projection was randomised on release) and the model keeps only ~2 min of context. NeMo-only stack, no LoRA/PEFT. |
-| tsinghua-ee/ELLSA2 | No | The duplex speech backbone (SALMONN-omni lineage) is **not released**. The repo ships only a 0.5B gesture/expression generator, an ASR initialiser and motion tokenizers. Nothing to train a cache on. |
+| **PersonaPlex 7B** (nvidia/personaplex-7b-v1) | **Go, primary** | Moshi architecture: a 7B pure-attention temporal transformer with a causal ring KV cache; voice sample and persona text already enter as a stream prefix, which is exactly the slot a cartridge fills. Real Fisher-trained backchannels, a text stream to evaluate through, an MLX port for Apple Silicon, open weights. No training code, so we write the trainer. |
+| **hertz-dev** (si-pbc/hertz-dev) | **Go, parallel** | The closest open match to Dessa: audio in, audio out, no text anywhere, 8.4B decoder-only transformer with a plain KV cache, trained on real conversational audio, Apache-2.0. Its LM predicts discrete 15-bit audio tokens per channel, so the same distillation applies. It is a base model with no instruction following, CUDA-only, with a 256 s context: harder, and one wave behind PersonaPlex. |
+| NemotronLabs VoiceChat 11B | No | Mamba-heavy hybrid backbone (4 of 56 layers have a KV cache), voice-locked TTS, ~2 min context, NeMo-only stack. |
+| tsinghua-ee/ELLSA2 | No | The duplex speech backbone was never released; only a gesture generator shipped. |
 
-**On the Dessa profile** (textless, audio-only, trained on real conversation,
-runs on a MacBook): no open model on the Awesome-Full-Duplex-SDM list matches
-it with released weights at usable quality. The closest open equivalent is
-**hertz-dev** (Standard Intelligence, 8.4B, audio-only, Apache-2.0), which is
-not on the list. A KV cache is structurally trainable on it, but it is a base
-model with no instruction following, no text stream to evaluate through, and
-no Mac build. Section 1.4 ranks the candidates and section 5 records the
-decision: PersonaPlex for the journal cartridge, hertz-dev as an optional
-voice-only pilot.
+What to expect, from the evidence in section 1 and the prior art:
 
-What the cartridge can and cannot do, given what we know today:
-
-- **Journal memory: same method, same expected ceiling.** The self-study loop
-  (Teacher with evidence in context, student with cartridge, per-token KL,
-  then on-policy distillation) transfers directly. Expect the same class of
-  result as the text cartridge: strong style and theme transfer, partial fact
-  recall (we close ~60% of the context gap on text; speech will be at or below
-  that because the 7B Helium backbone is weaker than Qwen3.8-27B).
-- **Voice: a prefix gets you to PersonaPlex's own level, not beyond.**
-  PersonaPlex's audio prefix reaches 0.57–0.65 speaker similarity (WavLM-TDNN)
-  from a short clip. Across the TTS literature, longer reference prompts
-  saturate speaker similarity and improve only prosody; LoRA fine-tuning adds
-  roughly +0.1 similarity but can degrade audio quality. So: the cartridge
-  carries your voice *at prompt quality for free*; a closer match needs a small
-  LoRA on PersonaPlex trained on your voice clips, with the cartridge trained
-  on top of the merged weights. We treat that as a gated phase 2.
-- **Nobody has done this.** There is no published prefix-tuning or trained-KV
-  result on any codec-token LM. We would be first, and we must budget for
-  unknowns (section 3.6).
+- **Diction and content: the same method as the text cartridge.** The
+  cartridge is initialised from a prefill of the author's voice clip, a
+  persona and a journal digest, then trained on synthetic conversations
+  whose responses are composed from the author's own passages (stage 1),
+  then refined on its own rollouts (stage 2). The text cartridge closes
+  about 60% of the context gap on facts; here the target is closer to the
+  source text, so verbatim coverage is the measure, not recall.
+- **Voice: prompt-level similarity for free, more with training.**
+  PersonaPlex's audio prefix reaches 0.57–0.65 speaker similarity from a
+  short clip. Stage 1 trains on the author's voice rendered by Kyutai
+  Pocket TTS, so the acoustic target *is* the author; the ablation in #16
+  measures how much that adds over the prefix, and a LoRA phase (#17) is
+  gated on that number.
+- **Evaluation is the product.** A deployed stock model is scored against a
+  versioned eval set before any cartridge code exists, and every later
+  change adds a point to the same W&B record (brief §3, §4, §8).
+- **Nobody has done this.** No published prefix-tuning or trained-KV result
+  exists on any codec-token model. Section 3.6 lists the unknowns.
 
 ## 1. Model survey
 
@@ -166,372 +167,363 @@ Step-Audio or LLaMA backbone with speech tokens interleaved), and four of the
 have no weights yet. hertz-dev is the only open model that matches Dessa's
 defining property of learning language from speech alone at a usable scale.
 
-**What a cartridge on hertz-dev would look like, and why it is not the main
-line.** Structurally it is the easiest of all: one decoder-only transformer,
+**What a cartridge on hertz-dev would look like, and why it runs one wave
+behind PersonaPlex.** Structurally it is the easiest of all: one decoder-only transformer,
 one causal KV cache, no depth transformer, no text stream. A cartridge is K/V
 for `p` of the 2048 steps per layer (40 layers × 2 × p × d). Initialisation is
 a prefill of your own voice on the agent channel, which is the only way the
 model takes a voice anyway. The problems are what the model *is*:
 
 1. **No instruction following.** hertz-dev continues conversations; it does
-   not answer questions. "Compress my journal" becomes "continue
-   conversations as me, about my life". That is a legitimate goal, and
-   arguably closer to Dessa, but it is not the question-answering target our
-   evals and task DB are built for.
-2. **Textless self-study is possible but unproven.** The teacher is hertz-dev
-   with a journal chunk *read aloud by your TTS* inside its 4-minute window,
-   followed by the other speaker's question; the student is the cartridge.
-   Targets are the teacher's per-step predictions on the agent channel. We
-   would need to confirm whether hertz-ar's head is a discrete distribution or
-   a continuous-latent regression; the loss changes accordingly (KL vs
-   likelihood on latents), and our pipeline has no continuous-target path.
+   not answer questions. That suits the retelling target (continue the
+   conversation as the author, about the author's life) better than a Q&A
+   target would, but the question must be in the audio and the model must
+   take the turn on its own; the timed test in the brief's §8 measures
+   exactly that.
+2. **Textless self-study is unproven.** The teacher is hertz-dev with the
+   passages *read aloud by Pocket TTS* inside its 4-minute window, followed
+   by the question; the student is the cartridge. The code inspection
+   settled the loss: hertz-ar's LM emits a discrete 15-bit FSQ token per
+   channel (so KL distillation applies) and its resynthesizer a Gaussian
+   mixture over 32-d latents (so the SFT loss adds a mixture NLL).
 3. **No evaluation path without text.** Every memory metric we have goes
    through transcripts. We can still transcribe the output with Phonon-2, but the model's own
    knowledge is not readable the way a text stream is.
 4. **No Mac build.** Dessa's local-run promise is met today by Moshi and
    PersonaPlex through MLX, not by hertz-dev.
 
-Decision: PersonaPlex stays the target for the journal cartridge, because it
-is the most Dessa-like open model that *also* answers questions, carries real
-Fisher-trained backchannels, and runs on Apple Silicon. hertz-dev is the right
-target for a *voice-and-style* cartridge in the Dessa sense (sound like you,
-interrupt and backchannel like you, with no text anywhere), and is proposed
-as an optional side pilot (phase 0b in section 4.5) whose only question is:
-does a trained KV prefix hold a speaker identity and style across the full
-4-minute window better than the raw audio prefix does? If that pilot works,
-the textless route reopens for memory with a textless teacher.
+Decision: both. PersonaPlex is the primary target because it is the most
+Dessa-like open model that also reads text, carries real Fisher-trained
+backchannels and runs on Apple Silicon; hertz-dev is the parallel target
+because it is the only open model that learned language from speech alone,
+and the brief's backend interface (§4b) lets one pipeline train and
+evaluate both. Where PersonaPlex reads persona and digest as text, hertz-dev
+hears them spoken by Pocket TTS in the author's voice; where PersonaPlex is
+distilled on its text stream, hertz-dev is distilled on its discrete
+audio-token stream. hertz-dev's cartridge work runs one wave behind
+PersonaPlex's so the first backend's lessons carry over.
 
-## 2. Mapping our cartridge onto PersonaPlex
+## 2. Mapping the cartridge onto the two backends
 
-| Our text cartridge (Qwen3.8-27B) | PersonaPlex cartridge |
-|---|---|
-| 16 full-attention layers: K/V for `p` prefix tokens, post-RoPE at 0..p−1 | 32 temporal-transformer layers: K/V for `p` prefix *frames*, post-RoPE at 0..p−1 |
-| 48 Gated-DeltaNet layers: conv + recurrent initial state | None. The depth transformer has no cross-frame state, so the cartridge is temporal-only. Simpler than today. |
-| Positions are text tokens | Positions are 80 ms frames. `p = 1024` ≈ 82 s of "prompt time", `p = 2048` ≈ 164 s. |
-| `init_from_text`: prefill the first `p` tokens of the context block | Prefill the hybrid prompt: your voice clip (Mimi tokens on agent audio, sine on user) + `<system>` persona text + a journal digest forced at one token per frame. The result is byte-for-byte what PersonaPlex computes today for a voice + text prompt, so step 0 reproduces the stock model. |
-| Teacher: same model, full journal in context (205k tokens) | PersonaPlex cannot hold the journal (3000 frames ≈ 2.9k text tokens including the voice clip). Teacher is the **same model with per-question evidence** in its text prompt, where the evidence is written by our existing Qwen3.8 Teacher that has the full journal. This is the paper's chunked self-study, with the chunk chosen by a stronger text model. |
-| Targets: Teacher top-20 logprobs on answer tokens | Targets: PersonaPlex-teacher full logits on **agent text + 8 agent audio codebooks**, every frame of its rollout. User-audio streams are inputs, never targets. |
-| Student forward: HF `DynamicCache` with `_ReadOnlyKVLayer` | Student forward: non-streaming `LMModel.forward` over the full dialogue with each `StreamingMultiheadAttention` patched to concatenate cartridge K/V before its own K/V and offset RoPE and the causal mask by `p`. |
-| Stage 2: student samples, Teacher scores per token | Same. Student rolls out with `LMGen` from the cartridge; Teacher re-scores the rollout with evidence in context. |
-| Serving: vLLM prefix cache swap | Serving: patched `RingKVCache` with a **pinned prefix** region (section 4.4). |
-| Size: 0.3 GB at p=2048 | 2 × 32 layers × p × 4096 × 2 bytes: **0.54 GB at p=1024, 1.07 GB at p=2048**. |
+| Our text cartridge (Qwen3.8-27B) | PersonaPlex | hertz-dev |
+|---|---|---|
+| 16 full-attention layers: K/V for `p` prefix tokens, post-RoPE at 0..p−1 | 32 temporal layers: K/V for `p` prefix *frames* (12.5 Hz), one cache group `temporal` | 32 LM layers plus the 8 + 4 split resynthesizer layers: two cache groups, `lm` and `resyn`, `p` frames at 8 Hz |
+| 48 Gated-DeltaNet initial states | None; the depth transformer has no cross-frame state | None; the resynthesizer's state is its own KV cache, held in the `resyn` group |
+| Positions are text tokens | `p = 1024` ≈ 82 s of prompt time | `p = 512` ≈ 64 s; context is only 2048 frames (256 s) |
+| Init: prefill the first `p` corpus tokens | Prefill of the hybrid prompt: voice clip on agent audio, sine on user, `<system>` persona and digest forced one token per frame | Prefill of the voice clip followed by Pocket TTS speech of persona and digest on the agent channel, user silent, ≤ 720 frames |
+| Teacher: same model, full journal in context | Same model with the source passages in its `<system>` prompt (the journal does not fit: 3000 frames) | Same model with the passages read aloud on the agent channel before the question |
+| Targets: top-20 logprobs on answer tokens | Primary: the author's-voice render (Mimi tokens) and its aligned text; regulariser: top-20 on the text stream | Primary: the author's-voice render (FSQ tokens + latents); regulariser: top-20 on the agent FSQ stream |
+| Loss: KL per token | SFT: text CE (pad 0.3), semantic codebook 1, acoustic 0.02; plus λ·KL text stream | SFT: FSQ CE 1, GMM NLL on latents 1, user channel 0; plus λ·KL FSQ stream |
+| Student forward: HF `DynamicCache` with read-only layers | Patched `StreamingMultiheadAttention`: cartridge K/V prepended, RoPE offset `p`, mask extended | Strip `@torch.no_grad` on the two forwards; prepend both groups; pass an explicit causal mask (upstream drops it for multi-token chunks) |
+| Serving: vLLM prefix-cache swap | Pinned region in `RingKVCache`; the fork's own WebSocket server | Cloned prefix caches; `inference_server.py`; explicit window re-prefill at `context_frames − p` |
+| Size: 0.3 GB at p = 2048 | 0.54 GB at p = 1024 | ≈ 0.5 GB at p = 512 across both groups |
 
-Two things make the speech case *easier* than the text case: no linear
-attention states, and the base model already uses a prefix as its only
-conditioning channel, so a trained prefix is in-distribution in form.
-
-Three things make it harder:
-
-1. **The teacher is weaker and two-tiered.** PersonaPlex is a 7B Helium that
-   must read evidence from a forced text prompt. Our Qwen Teacher has to
-   pre-digest the journal per question.
-2. **The ring cache evicts the prefix.** With `p=2048`, the cartridge starts
-   being overwritten after 76 s of conversation. We must pin it.
-3. **Two objectives in one prefix.** Voice (acoustic codebooks) and memory
-   (text + semantic codebook) share the same `p` frames. Cartridges at Scale
-   (arXiv 2606.04557) reports that *mixing independently trained cartridges
-   collapses to chance*, so voice and journal are trained jointly in one
-   cartridge, never composed.
+Easier than the text case: no linear-attention states, and both base models
+already take their only conditioning from a prefix. Harder: the teachers are
+weaker and must read passages from the prompt; PersonaPlex's ring cache
+evicts the prefix unless pinned; hertz-dev has no instruction following and
+a 256 s context; and voice and content share one prefix, so they are
+trained jointly (independently trained cartridges collapse when mixed,
+arXiv 2606.04557).
 
 ## 3. Technical requirements
 
 ### 3.1 Functional
 
-- **F1. Drop-in prefix.** A cartridge is a directory `cartridge.safetensors` +
-  `cartridge.json`, loadable by a patched PersonaPlex server in place of
-  `--voice-prompt` and `--text-prompt`. The server behaviour with the
-  step-0 (prefill-only) cartridge must be indistinguishable from the stock
-  voice + text prompt: identical logits on a fixed test dialogue (tolerance
-  bf16 round-off).
-- **F2. Memory.** The model with the cartridge answers spoken questions about
-  the journal. Metric: our existing Teacher judge (rubric `score-v0`) on
-  Phonon-2 transcripts of the agent's audio, plus context-gap-closed on the
-  agent *text* stream against the PersonaPlex teacher.
-- **F3. Voice.** The agent speaks in your voice. Metric: speaker similarity
-  (WavLM-TDNN or ECAPA cosine) between agent audio and held-out clips of you.
-  Target: ≥ the stock voice-prompt baseline (≈0.6) for phase 1; ≥ 0.7 for
-  phase 2 (LoRA).
+- **F1. Drop-in prefix.** A cartridge is a directory (`cartridge.safetensors`
+  + `cartridge.json`) loadable by the backend's own server in place of its
+  prompt. The step-0 (prefill-only) cartridge reproduces the stock prompt's
+  logits on a fixed test dialogue to bf16 round-off.
+- **F2. Talks as the author.** First person; responses retold from the
+  journal with ≥ 0.6 verbatim 4-gram coverage of the transcript on story
+  prompts; chronology in written order on change prompts; no spoken
+  citations.
+- **F3. Voice.** Speaker similarity to held-out clips ≥ the stock prompt
+  baseline (≈ 0.6) after stage 1; ≥ 0.7 after the gated LoRA phase.
 - **F4. Duplex behaviour preserved.** Turn-taking latency, interruption
-  latency, and *spurious onset rate* (speaking into silence; stock PersonaPlex
-  does this in 27.5% of 5-min silences, arXiv 2609.13445) must not regress by
-  more than 10% relative to the stock prompt.
-- **F5. Persistence.** The cartridge stays resident for the whole session
-  (pinned), independent of dialogue length.
+  latency and spurious-onset rate within 10% of the stock baseline.
+- **F5. Persistence.** The cartridge stays resident for the whole session,
+  independent of dialogue length.
+- **F6. Topic exclusion.** Zero responses about sexuality or anger on the
+  baited prompts; an in-character decline instead.
+- **F7. Evaluable as deployed.** Every number above is measured by
+  `voice eval` against a served endpoint, logged to W&B next to the
+  backend's stock baseline (brief §4, §8).
 
 ### 3.2 Data
 
-- **D1. Your voice.** ≥ 10 min of clean 24 kHz mono speech, −24 LUFS
-  normalised, split 80/10/10 for prompt / voice-training / speaker-similarity
-  eval. A 10 s to 30 s segment becomes the voice prompt in the cartridge
-  init; similarity saturates beyond ~10 s (VALL-E 2, Voicebox), longer helps
-  prosody.
-- **D2. Your TTS.** The fine-tuned TTS on your voice clips (Chatterbox,
-  CosyVoice2 or Kyutai Pocket TTS style) renders agent-side answers in your
-  voice for the voice objective (phase 1 audio CE term and phase 2 LoRA). Its
-  own speaker similarity to you is measured first; it is the ceiling of what
-  we can teach.
-- **D3. Questions.** Reuse the task DB: 2,785 train / 198 held-out questions
-  (author's questions, chat prompts, psychology items, synthetic). Spoken
-  versions are rendered with a *pool of other voices* (not yours) on the
-  user channel, with noise and room-IR augmentation as PersonaPlex did.
-- **D4. Evidence briefs.** For each train question, the Qwen Teacher (full
-  journal) writes a ≤ 300-token brief: the facts and page citations the
-  answer rests on. This goes into the PersonaPlex teacher's `<system>` prompt.
-  Budget: 300 tokens = 300 frames = 24 s of prompt time; keeps the teacher's
-  total prompt under ~700 frames so the dialogue still fits in 2048.
-- **D5. Teacher rollouts.** PersonaPlex with [voice clip + persona + brief]
-  answers each spoken question; store per frame the agent text token, 8 agent
-  audio tokens, and full logits (text 32k, audio 8 × 2048) as top-k (k=20) +
-  sampled token, matching our target store shape. ~3,000 dialogues of ~60 s.
-- **D6. Journal digest for init.** A ≤ 1,500-token digest of the journal
-  (timeline + recurring people/places, written by the Qwen Teacher) forced
-  into the init prefill after the persona text, so the step-0 cartridge
-  already holds a skeleton of the facts (the analogue of initialising from
-  the first 2,048 journal tokens; Attention Matching does not apply because
-  the teacher never holds the full journal).
+- **D1. The author's voice.** `data/voice/josh-thoughts-1.m4a` (~9.8 min,
+  git-ignored) → 24 kHz mono WAV at −24 LUFS, split 80/10/10: TTS prompt
+  and cartridge init / Pocket TTS fine-tune if needed / speaker-similarity
+  eval. A 30 s prompt segment goes into the eval-set artifact so every
+  backend's stock prompt is the same voice.
+- **D2. Author-voice TTS.** Kyutai Pocket TTS cloned from the prompt split
+  renders every agent-side answer. Its similarity to the eval split is the
+  voice ceiling; if < 0.7, fine-tune it on the training split first.
+- **D3. Passages.** The journal segmented into dated passages with pages.
+  The Qwen Teacher labels each `sexuality` / `anger` / `other` plus a
+  `borderline` flag; only `other` and not borderline survive, in every
+  artifact. Held-out passages span every journal year and are disjoint
+  from training.
+- **D4. Questions.** Conversational, generated from the passages: story
+  (one passage), change (passages ≥ 1 year apart), idea (an opinion), plus
+  the author's own questions. Psychology-test items are dropped.
+- **D5. Responses.** Composed by the Qwen Teacher under hard constraints
+  and validated mechanically: ≥ 80% of tokens verbatim from the source
+  passages (4-gram coverage), first person, spoken register of 2–6
+  sentences, dates in words, no citations in the spoken text, topic
+  classifier pass. ~3,000 train, ~200 held-out.
+- **D6. Eval set first.** A versioned W&B artifact `voice-evalset` with the
+  held-out prompts and reference responses, 20 baited prompts, 60 scripted
+  2-minute user tracks for the timed test, Full-Duplex-Bench audio, and the
+  voice eval split, in `smoke` (10 prompts) and `full` sizes. Built before
+  any training data (#22).
+- **D7. Digest.** A ≤ 1,500-token journal digest from `other` passages for
+  the cartridge init (PersonaPlex as text; hertz-dev as ≤ 60 s of speech).
+- **D8. Transcription.** Phonon-2 (`FermionResearch/Phonon-2`) for every
+  transcript and every word timestamp, through one wrapper, with
+  Parakeet-TDT per-word confidence.
 
 ### 3.3 Model and code
 
-- **M1. A `DuplexCartridge` module** mirroring `cartridge/cache.py`:
-  per-layer K/V parameters `[1, 32 heads, p, 128]` in fp32 master, bf16 in
-  forward; first `num_frozen_tokens` frames frozen as the attention sink;
-  `from_prefill(lm_model, frames)` and `init_from_prompt(voice_wav,
-  persona_text, digest_text)`; `save`/`load`.
-- **M2. Training forward.** A context manager that patches every temporal
-  `StreamingMultiheadAttention.forward` to (a) concatenate cartridge K/V in
-  front of the layer's K/V, (b) start RoPE positions at `p`, (c) extend the
-  causal mask by `p` fully-visible columns. Gradient flows into the cartridge
-  through the concat exactly as in `_ReadOnlyKVLayer`. The depth transformer
-  is untouched. Gradient checkpointing per temporal layer; model weights
-  frozen, `requires_grad=False`.
-- **M3. Loss.** Per frame, over agent streams only:
-  `KL(teacher_text ‖ student_text) + Σ_c w_c · KL(teacher_audio_c ‖
-  student_audio_c)` with `w_0 = 1` (semantic codebook) and `w_1..7 = 0.02`
-  (PersonaPlex's own non-semantic weight), plus an optional voice term
-  `CE(student_audio_c, mimi(your_tts_render))` on dialogues where the agent
-  audio was re-rendered by your TTS. Padded text frames weighted 0.3. The
-  prefix itself has no loss.
-- **M4. Stage 2 on-policy.** `LMGen` rollouts from the cartridge with the
-  pinned-prefix cache (M5); the PersonaPlex teacher re-scores the rollout
-  (user audio + the student's agent streams, teacher-forced) with the brief in
-  context; reverse KL, full vocab, as in `onpolicy.py`. Anchor mix 0.25 → 0.5
-  as today.
-- **M5. Pinned-prefix ring cache.** `RingKVCache` gains a `pinned: int`
-  region: slots `0..p−1` are written once at session start and excluded from
-  the ring arithmetic; the ring covers `p..capacity−1`. Attention always sees
-  prefix + ring window. This is the StreamingLLM / attention-sink layout.
-  Also needed by the stock server to keep any long voice prompt alive, so it
-  is a candidate upstream contribution.
-- **M6. Server flag.** `moshi.server --cartridge <dir>` and `moshi.offline
-  --cartridge <dir>` load M1, fill the pinned region, and skip
-  `step_system_prompts`. The `.pt` voice path remains as-is.
-- **M7. Tokenizer boundary.** No cross-tokenizer KL anywhere: the Qwen Teacher
-  only writes *text* (briefs, digest, judge scores); every distribution we
-  match is PersonaPlex's own.
-- **M8. Phase 2 LoRA (gated).** moshi-finetune-style LoRA on the temporal
-  transformer, with explicit wrappers for `in_proj_weight`, gating and
-  depformer stacked weights (the paths module-swap misses). Data: dialogues
-  whose agent audio is your real voice or your TTS. Merge into weights, then
-  train the cartridge on the merged model. Only if phase 1 similarity < 0.65.
+- **M1. Backend protocol.** One `DuplexBackend` protocol and registry
+  (brief §4b): `encode_dialogue`, `decode_agent`, `build_prefix`,
+  `cartridge_from_prefill`, `forward`, `sft_loss`, `distill_loss`,
+  `rollout`, `serve`; shared `Frames`, `Cartridge`, `Outputs` types; a
+  generic trainer, eval and report that only ever call `backends.get`.
+- **M2. Cartridge.** Named cache groups of per-layer K/V parameters, fp32
+  master and bf16 in forward, first frame frozen as the sink; `save`/`load`
+  with `cartridge.json` metadata (backend, spec hash, fork commit, p,
+  voice and digest hashes, stage, step).
+- **M3. Training forward.** Full-sequence, differentiable with respect to
+  the cartridge only, model frozen, gradient checkpointing; the
+  backend-specific patches of section 2.
+- **M4. Loss.** `backend.sft_loss` on the agent streams of the
+  author's-voice frames plus `λ · backend.distill_loss` to the
+  passage-prompted teacher's stored top-20 on the discrete agent stream;
+  λ swept over {0, 0.5}; prefix excluded.
+- **M5. Stage 2.** On-policy: rollouts from the pinned prefix, reverse KL
+  on the discrete agent stream to the passage-prompted teacher, audio
+  anchored by Pocket TTS renders of the sampled text, anchor mix
+  0.25 → 0.5 as in `onpolicy.py`.
+- **M6. Pinned prefix and serving.** PersonaPlex: a pinned region in
+  `RingKVCache` (section 4.4). hertz-dev: cloned prefix caches with an
+  explicit window re-prefill. `voice deploy --system <cartridge>` serves
+  either on Modal.
+- **M7. Isolation.** Everything lives in the `voice/` and `shared/`
+  workspace members; nothing in `src/cartridges/` changes; `shared/` holds
+  adapted copies of the Qwen Teacher client, tracking, judge, target shards
+  and optimizer (section 4.1).
+- **M8. LoRA (gated).** Only if the ablation (#16) leaves speaker similarity
+  < 0.65: explicit LoRA wrappers for the fork's `in_proj_weight`, gating and
+  depformer stacked weights, merged, then the cartridge retrained.
 
 ### 3.4 Infrastructure
 
-- **I1. GPU.** One H100 80 GB or H200 for everything. Weights 16.7 GB bf16;
-  student forward at 3000 frames with checkpointing ≈ 10–20 GB activations at
-  micro-batch 2; cartridge + Adam state ≈ 4.3 GB at p=2048 (268M fp32 params
-  × 4 states), 2.1 GB at p=1024. Fits comfortably. Modal: `gpu="H200"`,
-  `timeout=6h`, same image lineage as `train_distill.py` plus the vendored
-  `moshi` fork, `sentencepiece`, `fermion-research` (Phonon-2) for evals.
-- **I2. Storage.** Teacher rollouts with top-20 logits: 3,000 dialogues ×
-  750 frames × 9 streams × 20 × (4+4 bytes) ≈ 3.2 GB. Target store shards as
-  today (`tasks/targets.py`) with a `stream` column.
-- **I3. Tracking.** W&B runs and artifacts exactly as the text pipeline;
-  cartridge artifact type `duplex-cartridge`.
-- **I4. Audio tooling.** Mimi encode/decode (shipped); **Phonon-2**
-  (`FermionResearch/Phonon-2`, English ASR derived from Parakeet-TDT-0.6B-v3,
-  CC-BY-4.0, 164 MB) for every transcript and for word-level timestamps
-  (`phonon transcribe --json` gives a start and end time per word); it runs
-  on Apple Silicon via MLX for local work and in its CUDA Docker image on
-  Modal for batch evals, at thousands of times real time on an H100;
-  WavLM-TDNN (or `speechbrain` ECAPA) for speaker similarity;
-  Full-Duplex-Bench scripts for turn-taking. Phonon-2 is English-only, which
-  matches the journal.
+- **I1. GPU.** One H200 per job. PersonaPlex: 16.7 GB weights, ≈ 10–20 GB
+  activations at micro-batch 2 with checkpointing, cartridge + Adam ≈ 2 GB
+  at p = 1024. hertz-dev: ≈ 17 GB weights bf16 for LM + resynthesizer,
+  `torch==2.5.1`, CUDA only. Modal apps `voice-train` and `voice-serve`.
+- **I2. Storage.** Volumes `voice-data` (passages, dialogues, per-backend
+  frames, targets) and `voice-voice` (the author's clips). Targets ≈ 0.4 GB
+  per backend for 3,000 dialogues.
+- **I3. Tracking.** W&B project `voice` under the brief's §4 conventions:
+  one group per experiment with a baseline pointer, fixed run names and
+  summary metric names, artifacts `voice-evalset`, `voice-dialogues`,
+  `voice-targets`, `voice-cartridge`, `voice-report`.
+- **I4. Audio tooling.** Mimi and hertz-codec (shipped with the models);
+  **Phonon-2** (English ASR derived from Parakeet-TDT-0.6B-v3, CC-BY-4.0,
+  164 MB; `phonon transcribe --json` gives per-word start and end times;
+  MLX locally, CUDA Docker on Modal); Kyutai Pocket TTS; WavLM-TDNN (or
+  `speechbrain` ECAPA) for speaker similarity; Full-Duplex-Bench v1 and
+  v1.5 harnesses; UTMOS.
 
 ### 3.5 Evaluation
 
-| Metric | Baseline (stock prompt) | Phase 1 target | How |
+The protocol is the brief's §8, modelled on Thinking Machines' interaction
+model evaluation: five axes, a frontier plot of fidelity against
+interaction quality and against latency, five side-by-sides, and every
+checkpoint reported next to its backend's stock baseline. Headline measure
+per axis:
+
+| Axis | Headline measure | Stock baseline | Phase 1 target |
 |---|---|---|---|
-| Teacher-forced KL to PersonaPlex teacher, agent text stream | measured at init | −40% from init | held-out rollouts |
-| Context gap closed, text stream (base prompt ↔ teacher-with-brief) | 0 | ≥ 0.4 | NLL on held-out teacher rollouts |
-| Judge score (score-v0) on Phonon-2 transcript | measured | ≥ text cartridge stage 2 (2.9 fidelity) | 40 held-out tasks, Qwen Teacher judge |
-| Speaker similarity to you | ≈ 0.6 (prompt) | ≥ baseline; phase 2 ≥ 0.7 | WavLM-TDNN cosine, 100 utterances |
-| Turn-taking / interruption latency | 0.17 s / 0.24 s | within 10% | Full-Duplex-Bench |
-| Spurious onset rate | 27.5% | ≤ baseline | 20 × 5-min silence runs |
-| Word error rate of agent speech vs its own text stream | measured | within 10% | Phonon-2 |
+| Responsiveness | FDB v1 turn-taking latency (s); spurious onsets | PersonaPlex 0.17 s; 27.5% | within 10%; ≤ baseline |
+| Interaction quality | FDB v1.5 scenario average; CueSpeak-style timed macro-accuracy | measured | within 10%; reported |
+| Fidelity to the author | verbatim 4-gram coverage; `voice-v0` judge; first-person rate; topic violations | ≈ 0; measured; measured; 0 | ≥ 0.6 (story); reported with CI; ≥ 0.95; 0 |
+| Voice | WavLM-TDNN speaker similarity; drift minute 1 vs 4; UTMOS | ≈ 0.6 (prompt) | ≥ baseline; no drift; UTMOS not down > 0.2 |
+| Naturalness | paired human preference, 30 prompts × 3 raters, plus the author's 1–5 | n/a | reported with binomial CI |
+
+Transcripts come from Phonon-2; the judge is the existing Qwen Teacher
+with a new `voice-v0` rubric that sees the matching passages. Two eval
+sizes: `smoke` (10 prompts, under 10 minutes, every PR and every training
+validation step) and `full`.
 
 ### 3.6 Risks and unknowns
 
-1. **Long forced text prompts are out of distribution.** PersonaPlex was
-   trained with short role prompts. Forcing a 300-token brief plus a
-   1,500-token digest may degrade the teacher. Mitigation: measure teacher
-   answer quality against brief length (0 / 100 / 300 / 600 tokens) before
-   generating labels; shrink the digest if the step-0 cartridge harms
-   turn-taking.
-2. **Prefix attention share.** A long trained prefix takes a growing share of
-   softmax mass as the dialogue shortens (PrefixMemory-Tuning, arXiv
-   2506.13674). We already train through this on text; on speech the symptom
-   would be degraded user-audio tracking (late or missed turn-taking). F4
-   catches it; `p=1024` is the safer first size.
-3. **Depth transformer sensitivity.** The depformer conditions on the temporal
-   output of the same frame; a drifted prefix could shift acoustic codebooks
-   into junk. No evidence either way in the literature. Mitigation: the
-   non-semantic weight 0.02 keeps acoustic codebooks close to the teacher, and
-   we monitor UTMOS / DNS-MOS on rollouts every validation step.
-4. **Voice via prefix saturates.** Expected. Phase 2 LoRA is the fallback and
-   its own literature warns of quality loss (DNS-MOS 3.65 → 3.23 in one
-   study) when the data has recording artefacts; your clips must be clean.
-5. **Two-tier teacher quality.** The 7B teacher may misread briefs. We can
-   grade teacher rollouts with the Qwen judge and keep only those scoring
-   ≥ 4 fidelity, as `label.py` already validates labels.
-6. **No upstream trainer.** We own the training forward of a vendored fork;
-   NVIDIA has not answered requests for training code. Budget the engineering
-   (section 4.6), and pin the fork commit (3428dfd).
-7. **License.** NVIDIA Open Model License permits commercial use and
-   derivatives with attribution; voice cloning of *your own* voice is fine, but
-   the shipped donated voices and Kyutai's watermark policy do not apply to
-   our prefix. Keep your clips private; the cartridge encodes your voice and
-   must be treated as personal data.
+1. **Long passage prompts are out of distribution** for both teachers.
+   #11 measures answer quality against passage length before any targets
+   are generated; if a backend cannot use passages at any length, its KL
+   regulariser drops to 0 and its objective is pure SFT.
+2. **Prefix attention share.** A long trained prefix takes a growing share
+   of softmax mass (PrefixMemory-Tuning, arXiv 2506.13674); the symptom on
+   speech is degraded user-audio tracking. F4 catches it; p = 1024 / 512
+   are the safer first sizes.
+3. **Acoustic drift.** A drifted prefix could push acoustic codebooks or
+   latents into junk. Low acoustic weight (PersonaPlex 0.02) and UTMOS at
+   every validation step guard it.
+4. **Voice via prefix saturates.** Expected; the ablation (#16) measures
+   what training on the author's voice adds, and LoRA (#17) is the gated
+   fallback, with its own quality-loss risk on noisy clips.
+5. **hertz-dev is a base model.** It continues conversations rather than
+   answering; the conversational-retelling target suits that, but there is
+   no text stream to read, CUDA-only code with hard-coded autocast, a
+   broken streaming codec path, and a 2048-frame cache that raises on
+   overflow. It is one wave behind for that reason.
+6. **No upstream trainer** for either model; we own both training forwards
+   on pinned commits (PersonaPlex fork `3428dfd`, hertz-dev `076c275`).
+7. **Two backends double the GPU bill** (section 4.6); the coordinator
+   confirms budget before wave 4.
+8. **Personal data.** The cartridge encodes the author's voice and journal.
+   Nothing under `data/` is committed or uploaded publicly; the eval split
+   lives in a restricted W&B artifact. Licenses: NVIDIA Open Model License
+   (PersonaPlex), Apache-2.0 (hertz-dev), CC-BY-4.0 (Phonon-2).
 
 ## 4. Implementation spec
 
+The authoritative contracts, conventions and per-issue guidance are in the
+brief (§4, §4b, §5, §6); this section records the shape.
+
 ### 4.1 Package layout
 
-```
-src/cartridges/duplex/
-  __init__.py
-  model.py        load PersonaPlex (vendored moshi fork), Mimi, SentencePiece; freeze
-  cache.py        DuplexCartridge (M1), prefix patch context manager (M2), pinned RingKVCache (M5)
-  prompt.py       build init frames: voice clip → Mimi tokens, persona + digest → forced text frames, sine user frames
-  data.py         Dialogue, Frame, TargetRow (stream, frame, token, topk); shard IO
-  teacher.py      PersonaPlex teacher: rollout with brief in context, capture per-stream logits
-  brief.py        Qwen Teacher writes evidence briefs and the journal digest (reuses cartridge/teacher.py)
-  tts.py          render user-channel questions (other voices) and agent answers (your TTS); augment
-  train.py        stage 1 distill (M3), stage 2 on-policy (M4); Modal app
-  evals.py        Phonon-2 transcripts, speaker sim, turn-taking, spurious onsets, judge glue
-  serve.py        --cartridge flag for moshi.server / moshi.offline (M6)
-```
+Two uv workspace members, isolated from the cartridge package:
 
-Reuse, do not copy: `cartridge/tasks/*` for questions and the Qwen judge,
-`cartridge/tracking.py`, `cartridge/tasks/targets.py` shard writer (add a
-`stream` column), `train_distill.py` optimizer (`make_optimizer`, relative
-LR, warmup) and `EarlyStopping`.
+```
+voice/                      # member "voice": the whole speech project
+  src/voice/
+    backends/               # base.py, registry.py, personaplex.py, hertz.py
+    passages.py data.py tts.py evalset.py teacher.py
+    train.py evals.py report.py client.py serve.py deploy.py cli.py
+  tests/
+shared/                     # member "shared": copied-out components
+  src/shared/
+    teacher.py tracking.py judge.py targets.py optim.py
+  tests/
+src/cartridges/             # untouched
+```
 
 ### 4.2 Data formats
 
 ```
-dialogue.jsonl       {id, task_id, user_wav, brief, teacher_rollout_ref, split}
-frames (safetensors) user_audio [T, 8] int16, agent_text [T] int32, agent_audio [T, 8] int16
-targets (parquet)    id, frame, stream (0=text, 1..8=audio), topk_ids[20], topk_logprobs[20]
-cartridge.json       {base_model, fork_commit, p, num_frozen_tokens, voice_sha, persona, digest_sha, stage, step}
-cartridge.safetensors keys.{layer} [1,32,p,128] fp32, values.{layer} [1,32,p,128] fp32
+passages.jsonl       {passage_id, entry_date (YYYY-MM-DD), pages [int], text, topic, borderline}
+dialogue.jsonl       {id, family, split, question, response_text, passage_ids [str], coverage,
+                      user_wav, agent_wav, words [{w, start_s, end_s, conf}]}
+frames/<backend>/<id>.safetensors   PersonaPlex: user_audio [T,8], agent_text [T], agent_audio [T,8]
+                                    hertz: user/agent FSQ tokens [T], user/agent mu latents [T,32]
+targets (parquet)    id, frame, stream (name), topk_ids int32[20], topk_logprobs float32[20]
+cartridge.json       {backend, spec_hash, base_model, fork_commit, p, num_frozen_tokens,
+                      voice_sha, persona, digest_sha, stage, step}
+cartridge.safetensors  <group>.keys.<layer>, <group>.values.<layer>, fp32
 ```
 
-### 4.3 Training forward (M2) in detail
+### 4.3 Training forward per backend
 
-For each temporal layer `l`:
+PersonaPlex, per temporal layer: rotate `q` and `k` at positions `p..p+T`,
+concatenate the cartridge's `K`/`V` in front, extend the causal mask by `p`
+fully visible columns, run SDPA; input embedding and depth transformer
+untouched. hertz-dev: remove the `@torch.no_grad` decorators on
+`HertzDevModel.forward` and `TransformerVAE.forward`, prepend both cache
+groups, and pass an explicit causal mask because `GQA._attend` sets
+`is_causal=False` whenever `q_len != k_len`; encode latents with
+`get_parameters=True` and use `mu`. Both: micro-batch 2, accumulation to
+16, bf16, Adam with relative LR 5e-2 (sweep 1e-2 … 1e-1), warmup 5, early
+stopping on held-out SFT loss with the smoke eval as the promotion
+criterion.
 
-```
-q, k, v = proj(x)                      # [B, T, H, D]
-q = rope(q, pos = p + arange(T))
-k = rope(k, pos = p + arange(T))
-k = cat([K_cart[l].expand(B), k], dim=T)   # [B, p+T, H, D]
-v = cat([V_cart[l].expand(B), v], dim=T)
-mask = causal(T) padded with p True columns on the left
-out = sdpa(q, k, v, mask)
-```
+### 4.4 Pinned prefix and serving
 
-`K_cart`, `V_cart` are the cartridge's bf16 views of fp32 parameters; the
-first `num_frozen_tokens` (default 1) frames are buffers. The model's own
-17-stream input embedding and depformer run unchanged. Micro-batch 2 at
-T ≤ 2048 frames, grad accumulation to batch 16. Mixed precision bf16, Adam,
-relative LR 5e-2 (sweep 1e-2 … 1e-1 as before), warmup 5 steps, early
-stopping on held-out teacher-forced KL.
+PersonaPlex: `RingKVCache(pinned=p)` keeps slots `0..p-1` fixed and rings
+over `p..capacity-1`; attention always sees prefix + window; capacity
+stays 3000, leaving 158 s of rolling dialogue at p = 1024. hertz-dev: the
+cache is a fixed tensor that raises past its length, so `serve` clones the
+prefix caches and, at `context_frames − p`, drops the oldest dialogue
+frames and re-prefills behind the pinned prefix. `voice deploy --backend X
+--system stock|<artifact>` serves either as Modal app `voice-serve`.
 
-### 4.4 Pinned-prefix ring cache (M5)
+### 4.5 Waves and gates
 
-```
-class RingKVCache:
-    def __init__(self, ..., capacity, pinned=0): ...
-    # slots [0, pinned) fixed; ring over [pinned, capacity)
-    def complete(self, k, v):   # returns keys/values for attention
-        return cat(cache[:, :pinned], ring_window(...))
-    positions: pinned region reports 0..pinned-1, ring reports absolute frame + pinned
-```
+Evaluation-driven, inference first (brief §3 has the full table):
 
-`set_attention_context(3000)` stays. With `p=1024` the dialogue window is
-1976 frames (158 s) of rolling context after the pinned cartridge, versus
-3000 frames today; raising `capacity` to 4096 is possible but RoPE beyond
-3000 frames is untested on this checkpoint and must be measured (F4).
-
-### 4.5 Phases and gates
-
-| Phase | Deliverable | Gate to continue |
+| Wave | Issues | Exit criterion |
 |---|---|---|
-| **0. Parity** (1 week) | `DuplexCartridge.from_prefill` + M2 + M5 + `--cartridge` flag. Step-0 cartridge reproduces stock prompt logits on 10 test dialogues; pinned cache keeps a voice prompt alive past 240 s. | Max abs logit diff < 1e-2 bf16; turn-taking unchanged. |
-| **0b. hertz-dev voice pilot** (optional, 1 week, CUDA only) | KV prefix on hertz-ar initialised from 60 s of your voice on the agent channel; trained on 2-channel continuations where the agent channel is your TTS. Measures speaker similarity and backchannel rate at minutes 1–4 vs the raw audio prefix. | Similarity ≥ raw prefix at minute 4; decides whether the textless route is worth a memory attempt. |
-| **1a. Teacher study** (3 days) | Teacher answer quality vs brief length; digest length vs duplex metrics. | Pick brief/digest sizes with no F4 regression. |
-| **1b. Labels** (3 days GPU) | 3,000 teacher rollouts with per-stream top-20 targets; judge-filtered. | ≥ 2,000 rollouts with fidelity ≥ 4. |
-| **1c. Stage 1** (1 week) | Distilled cartridge, LR sweep, validation KL curve. | KL −40% from init; F4 within 10%. |
-| **1d. Stage 2** (3 days) | On-policy refinement. | On-policy KL −25%; judge ≥ 2.9 fidelity. |
-| **1e. Voice term** (3 days) | Add CE on your-TTS renders for 30% of batches. | Speaker sim ≥ baseline, UTMOS not down > 0.2. |
-| **2. LoRA** (gated, 1 week) | Voice LoRA with explicit wrappers; cartridge retrained on merged model. | Speaker sim ≥ 0.7, F4 holds. |
+| 0 | #19 workspace, protocol, registry, generic trainer | root tests unchanged; dry run on a fake backend |
+| 1a | #20 PersonaPlex stock inference + deploy + client · #21 hertz-dev stock inference + deploy · #22 eval set | two stock endpoints; `voice-evalset` v1 |
+| 1b | #9 harness and report against the endpoints | **two baseline rows in W&B**; smoke eval < 10 min |
+| 2 | #8 PersonaPlex cartridge half · #10 training data · #11 teacher study | step-0 parity; dialogues on the volume |
+| 3 | #18 hertz-dev cartridge half · #12 pinned cache + cartridge deploy · #13 targets | a cartridge served and re-evaluated |
+| 4 | #14 stage 1, deploy best, full eval | cartridge rows next to baselines; frontier plot |
+| 5 | #15 stage 2 · #16 voice ablation | same |
+| 6 | #17 LoRA, gated on #16 | same |
 
 ### 4.6 Cost
 
-Modal H200 at about $4.54/h. Phase 0 is engineering, ~2 GPU-h of tests.
-Labels: 3,000 × 60 s dialogues; PersonaPlex at batch 8 runs near real-time
-per batch, so ≈ 6 GPU-h ≈ $30. Stage 1: 200 steps × batch 16 × ~1,500 frames
-on a frozen 7B ≈ 3–5 GPU-h ≈ $20 per run, ~4 runs for the sweep ≈ $80.
-Stage 2: 30 steps with rollouts ≈ 4 GPU-h ≈ $20. Evals ≈ $10. **Phase 1 total
-≈ $160–200 GPU**, above the $15.9 left on the current $50 cap. Phase 2 LoRA
-≈ 6 h on one H100 per the moshi-finetune reference ≈ $25–30.
+Modal H200 at about $4.54/h. Per backend: labels and targets ≈ 2 GPU-h,
+stage 1 with a four-point LR sweep ≈ 15 GPU-h, stage 2 ≈ 4 GPU-h, evals
+(baseline, smoke at each validation step, full per checkpoint) ≈ 6 GPU-h,
+≈ $120–150. Both backends plus the ablation ≈ $300. Above the cap in
+`docs/plans/next-experiments.md`; the coordinator confirms budget before
+wave 4. LoRA, if opened, ≈ 6 h on one H100 per backend.
 
 ### 4.7 Acceptance criteria for "done" (phase 1)
 
-- [ ] F1 parity test passes in CI on a stored logits fixture.
-- [ ] A `duplex-cartridge` W&B artifact exists with `cartridge.json` stage 2.
-- [ ] Held-out eval report with every row of the 3.5 table filled, baseline
-      and cartridge side by side, 95% CIs by bootstrap over questions.
-- [ ] A 3-minute recorded conversation where the model, with no text prompt
-      and no voice file, answers three journal questions in your voice and
-      survives one interruption.
+- [ ] Parity tests for both backends pass on stored fixtures.
+- [ ] `voice-evalset` v1 and two stock baseline rows exist in W&B.
+- [ ] A stage 2 `voice-cartridge` artifact per backend, each with a
+      full-eval run in its experiment group and every §3.5 row filled with
+      CIs next to the baseline.
+- [ ] The report: table, two frontier plots, five side-by-sides per
+      backend, played to the author.
+- [ ] A 3-minute recorded conversation per backend where the model, with no
+      text prompt and no voice file, retells three journal stories in the
+      author's voice and survives one interruption.
 - [ ] README section "Speech cartridge" with the recipe tables in the same
       format as the text recipe.
 
 ## 5. Decisions taken in this document
 
-- Target model: PersonaPlex 7B at fork commit 3428dfd. Not VoiceChat, not
-  ELLSA2. Not hertz-dev for memory (base model, textless teacher unproven);
-  hertz-dev only as the optional voice pilot 0b.
-- Cartridge form: KV-level (keys and values per temporal layer), not
-  embedding-level prompt tuning, to match our code and capacity. The
-  embedding-level form (a trained `.pt` fed through `step_embeddings`) is a
-  zero-server-change fallback and a cheap ablation, not the main line.
-- Teacher: two-tier. Qwen3.8 with the full journal writes text briefs; the
-  PersonaPlex teacher with the brief in its prompt supplies every distribution
-  we match.
-- One cartridge for voice and memory, trained jointly; never compose two.
-- Voice beyond prompt quality is a gated LoRA phase, not part of phase 1.
-- First size `p = 1024` (0.54 GB, 158 s rolling window).
+- Target behaviour: the author's conversational self-portrait (first
+  person, near-verbatim journal retelling, the author's voice), not
+  question answering about the author. Sexuality and anger excluded from
+  every artifact.
+- Backends: PersonaPlex 7B (primary, fork commit 3428dfd) and hertz-dev
+  (parallel, one wave behind, commit 076c275), behind one `DuplexBackend`
+  protocol. Not VoiceChat 11B, not ELLSA2.
+- Cartridge form: KV-level, named cache groups per backend; one cartridge
+  for voice and content, trained jointly; never compose two.
+- Teacher: two-tier. The Qwen Teacher with the full journal writes passages
+  and responses as text; each backend's own model with the passages in
+  context supplies the distributions used for distillation.
+- Primary audio target: the author's voice via Kyutai Pocket TTS, from
+  stage 1. LoRA only if the ablation says the prefix is not enough.
+- Transcription: Phonon-2 everywhere.
+- Order: eval set and stock inference first, baselines as the wave-1 exit,
+  then cartridge, training, redeploy, re-eval; W&B as the record.
+- Layout: `voice/` and `shared/` workspace members; `src/cartridges/`
+  untouched.
+- First sizes: p = 1024 (PersonaPlex), p = 512 (hertz-dev).
 
-## 6. Open questions to settle before phase 1b
+## 6. Open questions, each owned by an issue
 
-1. How long a forced text prompt can PersonaPlex read before answer quality
-   or turn-taking drops? (Phase 1a.)
-2. Does your fine-tuned TTS reach ≥ 0.7 similarity to you on its own? If not,
-   the voice term and phase 2 have no ceiling worth chasing.
-3. Does a prefix of 1024 vs 2048 frames change spurious onsets? Decides the
-   capacity question in 4.4.
+1. How long a passage prompt can each backend read before quality or
+   duplex behaviour drops? (#11)
+2. Does Pocket TTS reach ≥ 0.7 similarity to the author on its own? If not,
+   fine-tune it before rendering. (#22)
+3. Does the packaged Phonon-2 CLI expose per-word confidence, or must it
+   come from NeMo decoding of the same lineage? (#9)
+4. Does a trained prefix add speaker similarity over the raw prefix on
+   either backend? (#16)
+5. Does hertz-dev's resynthesizer tolerate a trained `resyn` prefix, or
+   should only the `lm` group train? (#18)
 
 ## 7. Sources
 

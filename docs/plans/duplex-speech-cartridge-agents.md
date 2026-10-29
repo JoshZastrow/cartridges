@@ -37,10 +37,6 @@ and reported side by side.
 
 ## 1b. Target behaviour and dataset design
 
-This section overrides plan §3.2 D3–D5 and the question-answering framing
-of issues #9, #10, #11 and #13 where they differ. The issue bodies still
-describe the fact-answering version; follow this section.
-
 **Target behaviour.** With the cartridge and no other prompt, PersonaPlex:
 
 1. speaks in the author's voice (acoustic identity and prosody);
@@ -637,10 +633,10 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   explicitly). `deploy.py` exists from #20/#21; this issue adds
   `--system <cartridge artifact>` to it so a cartridge can be served and
   the full eval re-run against it, which is how every training issue ends.
-- **#13.** Scope is smaller than the issue body says: the primary targets
-  (author's-voice audio and aligned text) already come from #10. This issue
-  produces the optional text-stream regulariser targets: teacher-force each
-  #10 dialogue through PersonaPlex with its source passages in the
+- **#13.** The primary targets (author's-voice audio and aligned text)
+  already come from #10. This issue produces only the distillation
+  regulariser targets: teacher-force each #10 dialogue through the backend
+  with its source passages in
   context and store top-20 logits per frame on the discrete agent stream
   with `shared.targets`, for both backends (`--backend`). No free rollouts,
   no acoustic-codebook logits. ~0.4 GB per backend for 3,000 dialogues;
@@ -668,13 +664,13 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   for the acoustic streams, so the voice does not drift toward PersonaPlex's
   default. Serve rollouts through the #12 pinned cache so training matches
   inference.
-- **#16.** Now folded into #14 (the author's-TTS audio is the primary target
-  from the start). What remains here is the ablation: train with the audio
-  target replaced by PersonaPlex's own prompt-voice rollouts and report the
-  speaker-similarity gap, so the decision for #17 rests on numbers. The
-  alignment method (Phonon-2 word timestamps, the same role
-  `moshi-finetune/annotate.py` plays upstream) is #10's and must be
-  documented there.
+- **#16.** The author's-TTS audio is the primary target from stage 1
+  (#14), so this issue is the ablation: train the same recipe with the audio
+  target replaced by the backend's own prompt-voice rollouts, deploy both,
+  run the full eval on both, and report the speaker-similarity gap with
+  CIs, so the decision for #17 rests on numbers. The alignment method
+  (Phonon-2 word timestamps, the same role `moshi-finetune/annotate.py`
+  plays upstream) is #10's and must be documented there.
 - **#17.** Only if #16 reports < 0.65. Write explicit LoRA wrappers for
   `in_proj_weight`, gating `F.linear` and the depformer stacked weights
   before anything else; module-swap LoRA silently skips them. Merge, then
@@ -695,41 +691,6 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   frames (90 s). Parity test as #8, against `completion` on the stock prompt
   wav. CUDA only, `torch==2.5.1` pinned in `voice/pyproject.toml` as an
   extra (`voice[hertz]`) so the PersonaPlex path keeps its own torch.
-
-## 6b. Where the plan and the issues still say something else
-
-Section 1b changed the target after the plan and the issues were written.
-Until they are updated, this file wins. Specifically:
-
-- Plan §0 and §2 describe question answering about the journal with a
-  per-question evidence brief; the target is now first-person retelling in
-  the author's words, and the teacher prompt holds passages, not briefs.
-- Plan §3.2 D3–D5 and §3.5: replace with section 1b's dataset, audio and
-  measures. The psychology-test items are dropped.
-- Plan §3.3 M3 and phase 1e: the SFT loss on author-voice audio is the
-  primary objective from stage 1, not a 30% add-on; the text-stream KL is
-  the regulariser.
-- Issue #10 body: add passages, topic exclusion, response constraints,
-  Pocket TTS renders. Issue #13 body: text-stream regulariser targets only.
-  Issue #16 body: ablation, not the voice term. Issue #9 body: add the
-  section 1b measures and the `voice-v0` rubric.
-- The exclusion of sexuality and anger is new and applies to every
-  artifact: passages, digest, questions, responses, rollouts, evals.
-- Plan §4.1 and every issue body say `src/cartridges/duplex/` and
-  `cartridges/tasks/targets.py`; the code lives in `voice/` and `shared/`
-  per section 4, behind the backend protocol of section 4b, the CLI is
-  `voice`, and no cartridge file is edited.
-- The plan treats hertz-dev as an optional pilot (§1.4, phase 0b); it is
-  now a full parallel track (#18 as the `hertz` backend; every later issue
-  runs both backends).
-- Plan §3.5 is replaced by section 8's protocol.
-- Plan §4.5's phases are replaced by section 3's waves: inference and the
-  eval set first (#20, #21, #22), the harness and baselines as the wave-1
-  exit (#9), cartridge halves (#8, then #18) after that. The issue bodies
-  of #8, #9, #10, #12 and #18 were rewritten to match on 2026-10-29.
-
-The coordinator's first task is to edit those issue bodies and the plan to
-match this section, then post a comment on #7 saying it is done.
 
 ## 7. Protocol, in order
 
@@ -894,38 +855,36 @@ docs/plans/duplex-speech-cartridge-agents.md. You are the team lead and
 coordinator for epic #7 (speech cartridge: PersonaPlex and hertz-dev,
 evaluation-driven, inference first). Rules:
 
-1. First, edit the plan and the bodies of #13 and #16 per the brief's
-   section 6b so they match sections 1b, 3 and 4b, and comment on #7.
-2. Build the shared task list: one task per issue #8–#22, named
+1. Build the shared task list: one task per issue #8–#22, named
    "#N <title>", with the issue's "Blocked by" set as dependencies.
-3. Spawn teammates only for issues whose Status is Ready, at most four
+2. Spawn teammates only for issues whose Status is Ready, at most four
    implementers at once, named impl-N, using the voice-implementer agent
    type when it exists. Give each the spawn prompt in section 9.4 with its
    issue number filled in. Spawn one reviewer teammate named reviewer
    using the voice-reviewer type; it reviews every PR against the issue's
    acceptance list and the section 5 contracts and messages the
    implementer with findings.
-4. Do not write feature code yourself. Wait for teammates; synthesize
+3. Do not write feature code yourself. Wait for teammates; synthesize
    their summary comments; when a PR is approved and merged, set the
    issue's Status to Done, flip newly unblocked issues to Ready, and
    spawn the next teammates.
-5. Keep section 5 (interface contracts) of the brief current when a
+4. Keep section 5 (interface contracts) of the brief current when a
    summary comment reports a change, and message every teammate whose
    issue consumes that contract.
-6. Enforce the wave-1 exit criterion before anything in wave 2 starts:
+5. Enforce the wave-1 exit criterion before anything in wave 2 starts:
    two stock baseline rows in W&B from `voice eval --size full` against
    `voice-serve`, and a smoke eval under 10 minutes per system.
-7. Confirm GPU budget with the author before wave 4 (training). Post
+6. Confirm GPU budget with the author before wave 4 (training). Post
    every teammate's reported cost in a running total on #7.
-8. If a teammate idles without a summary comment or a task stays
+7. If a teammate idles without a summary comment or a task stays
    "in progress" after its PR is open, message it to finish; if it stopped
    on an error, read its transcript and either message it the fix or spawn
    a replacement with the same name and the same prompt.
-9. Never let a teammate edit src/cartridges/, data/, or another In
+8. Never let a teammate edit src/cartridges/, data/, or another In
    Progress issue's files. If one asks, say no and point at the owning
    issue.
-10. Shut down a teammate by name when its issue is Done and nothing is
-    Ready for it; the team ends when #7's task list is complete.
+9. Shut down a teammate by name when its issue is Done and nothing is
+   Ready for it; the team ends when #7's task list is complete.
 ```
 
 ### 9.4 Teammate spawn prompt (the lead fills in N)
@@ -933,8 +892,9 @@ evaluation-driven, inference first). Rules:
 ```
 You are impl-N on the speech-cartridge team (epic #7). Read CLAUDE.md,
 docs/plans/duplex-speech-cartridge.md and
-docs/plans/duplex-speech-cartridge-agents.md; the agents file overrides the
-plan and the issue body where they differ. Your issue is #N: read it and
+docs/plans/duplex-speech-cartridge-agents.md; the plan holds the research
+and requirements, the agents file holds the contracts and the protocol, and
+your issue body holds the acceptance list. Your issue is #N: read it and
 the summary comments of every issue it is blocked by.
 
 Setup: claim #N on the Cartridges board per CLAUDE.md (assign, Status In
