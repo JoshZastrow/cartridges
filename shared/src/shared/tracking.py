@@ -60,7 +60,7 @@ GPU_RATES_USD_PER_HOUR = {
 }
 
 _GROUP_RE = re.compile(r"^exp-\d{8}-[a-z0-9][a-z0-9-]*$")
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = next((p for p in Path(__file__).resolve().parents if (p / ".git").exists()), Path.cwd())
 
 
 # --- naming -------------------------------------------------------------------
