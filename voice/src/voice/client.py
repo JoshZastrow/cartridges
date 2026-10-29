@@ -32,7 +32,8 @@ conversation as the sum of
 
 A `*.modal.run` endpoint requires Modal proxy auth: the client sends the
 `Modal-Key` / `Modal-Secret` headers from the env vars MODAL_PROXY_TOKEN_ID /
-MODAL_PROXY_TOKEN_SECRET (see voice/README.md), and refuses to connect without them.
+MODAL_PROXY_TOKEN_SECRET (see voice/README.md), only to our workspace's hosts
+(`<MODAL_WORKSPACE>--*.modal.run`), and refuses to connect to them without the token.
 
     python -m voice.client smoke --url <ws-url> --prompts <dir of wavs> --out outputs/smoke
 """
@@ -158,11 +159,17 @@ def place(chunks: list[tuple[float, np.ndarray]], n_samples: int, sample_rate: i
 
 
 PROXY_ENV = ("MODAL_PROXY_TOKEN_ID", "MODAL_PROXY_TOKEN_SECRET")
+WORKSPACE_ENV, DEFAULT_WORKSPACE = "MODAL_WORKSPACE", "joshzastrow"
 
 
 def auth_headers(url: str, env=os.environ) -> dict[str, str]:
-    """Modal proxy-auth headers for a `*.modal.run` URL; none for any other host."""
-    if not (urlsplit(url).hostname or "").endswith(".modal.run"):
+    """Modal proxy-auth headers for a URL of our workspace's apps
+    (`<workspace>--*.modal.run`, workspace from MODAL_WORKSPACE, default
+    joshzastrow); none for any other host, so the token never reaches a
+    foreign Modal app."""
+    host = urlsplit(url).hostname or ""
+    workspace = env.get(WORKSPACE_ENV) or DEFAULT_WORKSPACE
+    if not (host.startswith(f"{workspace}--") and host.endswith(".modal.run")):
         return {}
     missing = [k for k in PROXY_ENV if not env.get(k)]
     if missing:

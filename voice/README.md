@@ -50,8 +50,10 @@ export MODAL_PROXY_TOKEN_ID=wk-...
 export MODAL_PROXY_TOKEN_SECRET=ws-...
 ```
 
-`voice.client` sends them as the `Modal-Key` / `Modal-Secret` headers to any
-`*.modal.run` URL and refuses to connect when either is unset.
+`voice.client` sends them as the `Modal-Key` / `Modal-Secret` headers only to
+our workspace's hosts, `<MODAL_WORKSPACE>--*.modal.run` (`MODAL_WORKSPACE`
+defaults to `joshzastrow`), and refuses to connect to them when either is
+unset. Any other host gets no token.
 
 A backend is a new module under `backends/` with `@register("name")`, a config
 class in `registry.py`, and an import in `backends/__init__.py`.

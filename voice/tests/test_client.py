@@ -147,8 +147,20 @@ def test_auth_headers_only_for_modal_and_fail_clearly_when_unset():
     from voice.client import auth_headers
 
     assert auth_headers("ws://127.0.0.1:8998/api/chat") == {}
-    url = "wss://me--voice-serve-personaplex.us-east.modal.run/api/chat?voice_prompt=NATF2.pt"
+    url = "wss://joshzastrow--voice-serve-personaplex.us-east.modal.run/api/chat?voice_prompt=NATF2.pt"
     env = {"MODAL_PROXY_TOKEN_ID": "wk-1", "MODAL_PROXY_TOKEN_SECRET": "ws-2"}
     assert auth_headers(url, env) == {"Modal-Key": "wk-1", "Modal-Secret": "ws-2"}
     with pytest.raises(RuntimeError, match="MODAL_PROXY_TOKEN_SECRET"):
         auth_headers(url, {"MODAL_PROXY_TOKEN_ID": "wk-1"})
+
+
+def test_auth_headers_never_reach_a_foreign_workspace():
+    from voice.client import auth_headers
+
+    env = {"MODAL_PROXY_TOKEN_ID": "wk-1", "MODAL_PROXY_TOKEN_SECRET": "ws-2"}
+    for url in ("wss://someone-else--voice-serve-personaplex.modal.run/api/chat",
+                "wss://evil.example/joshzastrow--x.modal.run", "wss://joshzastrow--x.modal.run.evil.example/api/chat"):
+        assert auth_headers(url, env) == {}, url
+    assert auth_headers("wss://lab--voice-serve-personaplex.modal.run/api/chat", {**env, "MODAL_WORKSPACE": "lab"})
+    assert auth_headers("wss://joshzastrow--voice-serve-personaplex.modal.run/api/chat",
+                        {**env, "MODAL_WORKSPACE": "lab"}) == {}
