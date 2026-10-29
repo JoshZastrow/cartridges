@@ -226,3 +226,43 @@ def test_transport_has_no_codec_hold():
     arrival is its "audio" arrival (the end-to-end test checks the pairing)."""
     assert HertzTransport.codec_hold_s == 0.0
     assert (HertzTransport.sample_rate, HertzTransport.frame_size) == (16000, CHUNK)
+
+
+def test_transport_sends_no_auth_headers_of_its_own(monkeypatch):
+    """Proxy auth rides only on the caller's session (voice.client scopes it to our
+    workspace); with the token in the env, a bare session still sends no Modal-* header."""
+    import asyncio
+
+    import aiohttp
+    from aiohttp import web
+
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-secret")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-secret")
+    seen = {}
+
+    async def handler(request):
+        seen.update(request.headers)
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.close()
+        return ws
+
+    async def run():
+        app = web.Application()
+        app.router.add_get("/audio", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession() as session:
+                t = HertzTransport()
+                await t.connect(session, f"ws://127.0.0.1:{port}/audio")
+                async for _ in t.received():
+                    pass
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+    assert seen and not any(k.lower().startswith("modal-") for k in seen)
