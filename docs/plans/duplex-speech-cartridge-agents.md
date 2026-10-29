@@ -158,19 +158,32 @@ More than that only creates merge conflicts in `voice/src/voice/`.
 
 ## 3. Waves (dependency order)
 
-| Wave | Issues | Can run in parallel | Unblocks |
-|---|---|---|---|
-| 0 | #19 bootstrap `voice/` and `shared/`, backend protocol, registry, generic trainer skeleton | alone | #8, #9, #10, #18 |
-| 1 | #8 PersonaPlex backend + parity · #18 hertz-dev backend + parity · #9 eval harness + baselines (both backends) · #10 data (shared `Dialogue`s, `encode` per backend) | all four | #11, #12 |
+**Strategy: evaluation-driven, inference first.** The evals are as much
+the product as the model. The first thing that must exist is a loop that
+scores a *deployed* model against a versioned eval set and records the
+result in W&B; every later issue adds a point to that record. So the order
+is: eval set and stock inference endpoints, then the harness and the two
+baselines (the wave-1 exit criterion), then cartridge mechanics, then
+training, then redeploy the variant and re-run the same eval. Training
+itself runs the smoke eval at every validation step, so a checkpoint is
+promoted on eval numbers, not on loss.
 
-From wave 2 on, every issue runs for both backends behind `--backend`; an
+| Wave | Issues | Can run in parallel | Exit criterion |
+|---|---|---|---|
+| 0 | #19 bootstrap `voice/` and `shared/`, backend protocol, registry, generic trainer skeleton | alone | root tests unchanged; `voice train --dry-run` on a fake backend |
+| 1a | #20 PersonaPlex stock inference + serve + deploy + client · #21 hertz-dev stock inference + serve + deploy · #22 eval set artifact (smoke + full) | all three | two stock endpoints answer the client; `voice-evalset` v1 in W&B |
+| 1b | #9 eval harness and report against the endpoints (needs #20, #21, #22) | alone | **two baseline rows in W&B**, produced by `voice eval --size full` against `voice-serve`, plus the smoke eval under 10 min per system |
+| 2 | #8 PersonaPlex cartridge half + parity (needs #20) · #10 training data (needs #22) · #11 teacher study (needs #9, #10) | all three | step-0 cartridge equals the stock prompt; train dialogues on the volume |
+| 3 | #18 hertz-dev cartridge half + parity (needs #21, #8: one wave behind, so #8's lessons carry over) · #12 pinned cache + `voice deploy --system <cartridge>` (needs #8) · #13 teacher targets (needs #11, #10) | all three | a cartridge can be served and the full eval re-run against it |
+| 4 | #14 stage 1 (needs #12, #13; hertz run when #18 is Done), ending with deploy of the best checkpoint and a full eval | alone | cartridge rows next to baseline rows in W&B, frontier plot updated |
+| 5 | #15 stage 2 on-policy (needs #14) · #16 voice ablation (needs #14) | both | same: deploy, full eval, record |
+| 6 | #17 voice LoRA, gated on #16's result | alone | same |
+
+From wave 3 on, every issue runs for both backends behind `--backend`; an
 issue is Done when both backends pass its acceptance list, or when the
-summary comment says which backend failed and why.
-| 2 | #11 teacher study (needs #9, #10) · #12 pinned cache + server flag (needs #8) | both | #13, #15 |
-| 3 | #13 teacher rollouts (needs #11, #10) | alone | #14 |
-| 4 | #14 stage 1 distillation (needs #8, #13) | alone | #15, #16 |
-| 5 | #15 stage 2 on-policy (needs #12, #14) · #16 voice term (needs #10, #14) | both | #17 |
-| 6 | #17 voice LoRA, gated on #16's result | alone | done |
+summary comment says which backend failed and why. Every issue from wave 4
+on ends the same way: deploy the result, run the full eval against the
+deployment, log it in the experiment group, update the report.
 
 The coordinator flips an issue to Ready only when every "Blocked by" issue is
 Done (merged). Do not start a Blocked issue "to get ahead": its contracts are
@@ -282,8 +295,41 @@ set by the issues before it.
   `uv run --package voice pytest`. The parity fixture from #8 (stored logits
   of the stock prompt path) is the one GPU-derived fixture and is committed
   once, small (10 dialogues, 50 frames each, top-20 only).
-- **Tracking.** W&B project `voice`, run group `voice-<issue>-<short>`,
-  artifact type `voice-cartridge`.
+- **Evals score the deployment.** `voice eval` drives a served endpoint
+  through the offline client (#20), audio in and audio out, never a Python
+  model object, so what is scored is what ships. `backend.rollout` is used
+  only by the in-training smoke eval. Two sizes from the same artifact:
+  `smoke` (10 prompts, under 10 minutes, gates every PR and every
+  validation step) and `full` (section 8).
+- **W&B is the lab notebook.** Project `voice`. Conventions every issue
+  follows:
+  - *Groups*: one per experiment, `exp-YYYYMMDD-<slug>`, holding the train
+    run, its eval runs and a `baseline_run` field pointing at the stock
+    baseline it is compared to.
+  - *Run names*: `<backend>/<system>/<stage>` where system is `stock` or a
+    cartridge artifact name, stage is `eval-smoke`, `eval-full`, `sft`,
+    `onpolicy`, `ablation`, `lora`; tags `baseline` or `candidate`, and the
+    backend name.
+  - *Every eval run logs*: config (backend, checkpoint or artifact and
+    version, `voice-evalset` version, seeds, judge model and rubric hash,
+    Phonon-2 version, git commit); one W&B Table per axis with
+    `metric, value, ci_low, ci_high, n`; the summary metrics under fixed
+    names (`fidelity/coverage`, `fidelity/judge`, `interaction/fdb15`,
+    `responsiveness/latency_s`, `voice/speaker_sim`, `naturalness/pref`);
+    the five side-by-sides as `wandb.Audio` with transcripts in a Table;
+    GPU-hours and dollars.
+  - *Every training run logs*: loss per stream and total, validation loss,
+    the smoke-eval summary metrics at every validation step under the same
+    names as the eval runs, the checkpoint artifact (`voice-cartridge`,
+    aliases `best` and `step-N`), and at the end the id of the full-eval
+    run of the promoted checkpoint.
+  - *Artifacts*: `voice-evalset` (versioned, #22), `voice-dialogues`
+    (training data, #10), `voice-targets` (#13), `voice-cartridge`,
+    `voice-report`. Audio under `data/` is never uploaded; the author's
+    eval split lives in the artifact under restricted project access.
+  - *Report*: `voice report` reads runs from W&B by group and tag, never
+    from local files, and writes its outputs back as a `voice-report`
+    artifact.
 - **Style.** Match `cartridges/cartridge/cache.py`: pure functions where
   possible, IO injected, Pydantic configs, docstring at the top of each
   module stating the shapes. Same ruff settings as the root.
@@ -459,14 +505,24 @@ channel before the question), teacher-forced on the dialogue's frames;
 discrete agent stream only (`agent_text` / `agent` FSQ). Written with
 `shared.targets` (stream column); read by #14, #15.
 
+**Client and deploy (from #20, #21)**
+```
+uv run voice deploy --backend personaplex|hertz --system stock|<cartridge artifact>   # Modal app voice-serve; prints the WebSocket URL
+voice.client.Client(url).converse(user_wav, max_s) -> Dialogue                        # real-time chunks in, agent audio + timestamps out
+```
+
+**Eval set (from #22)**
+```
+W&B artifact voice-evalset:v<N>: evalset.json {version, seeds, counts, hashes}, prompts/, baited/, timed/, fdb/, voice-eval/
+```
+
 **Eval CLI (from #9)**
 ```
-uv run voice eval --cartridge <dir|none> --tasks <jsonl> --out <dir>
+uv run voice eval --url <ws://...> --backend personaplex|hertz --evalset voice-evalset:v<N> --size smoke|full --group <exp>
 ```
-Writes `report.json` with the rows of plan §3.5 plus the section 1b
-measures (verbatim coverage, first-person rate, `voice-v0` judge scores,
-topic violations), each `{value, ci_low, ci_high, n}`, and logs to W&B.
-Baseline run name `duplex-baseline-stock`.
+Scores the endpoint only. Writes `report.json` with the section 8 rows,
+each `{value, ci_low, ci_high, n}`, and logs the run per the W&B
+convention in section 4. Baseline runs are named `<backend>/stock/eval-full`.
 
 **Server flag (from #12)**
 ```
@@ -506,8 +562,25 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   validation and early stopping are tested without any model. The `voice`
   CLI stubs take `--backend`. Confirm `uv run pytest` at the root still
   passes unchanged before opening the PR; that is the isolation test.
-- **#8.** This is the `personaplex` backend: implement every protocol
-  method for the vendored fork and register it. Start from the shipped `.pt` voice path: `LMGen.step_embeddings`
+- **#20.** Inference half of `personaplex` and the client. Use the fork's
+  own server unchanged; `deploy.py` wraps it in a Modal app with a
+  WebSocket endpoint; the client speaks the fork's protocol (Opus frames)
+  and records agent audio with wall-clock timestamps, which is what the
+  latency metrics read. Keep cold start measured: the 32 GB load spike is
+  the cost driver.
+- **#21.** Inference half of `hertz`. `inference_server.py` is the
+  server; the prompt wav is the author's clip. Document what happens at
+  2048 frames (the cache raises), because #12 has to design the window
+  around it. CUDA image variant; `torch==2.5.1`.
+- **#22.** The eval set is the first artifact and is versioned from day
+  one; a change to any prompt, track or split is a new version, and runs
+  record which version they used. Passages and topic exclusion live here
+  because the held-out passages must be fixed before any training passage
+  is chosen. The 30 s prompt segment of the author's voice is in the
+  artifact so every backend's stock prompt is the same voice.
+- **#8.** The cartridge half of the `personaplex` backend (#20 shipped the
+  inference half): `build_prefix`, `cartridge_from_prefill`, `forward`,
+  `sft_loss`, `distill_loss`, and the parity test. Start from the shipped `.pt` voice path: `LMGen.step_embeddings`
   shows exactly which frames a prompt occupies and how `end_offset` moves.
   Build the prefill with the stock `step_system_prompts`, then read the
   `RingKVCache` out of each layer; that is the init. The parity test compares
@@ -515,8 +588,13 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   expect bf16 noise, not zero. Watch the delay pattern
   `[0,0,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1]`: the prefix must end on a frame
   where all streams are consistent.
-- **#9.** Build section 8 as `voice eval` and `voice report`, generic over
-  `backend.rollout`: the Full-Duplex-Bench v1 and v1.5 harnesses on the
+- **#9.** Build section 8 as `voice eval` and `voice report`. `voice eval`
+  drives a served endpoint through the client from #20, never a Python
+  model object; inputs come from the `voice-evalset` artifact (#22) with
+  `--size smoke|full`; results follow the W&B convention in section 4. The
+  smoke eval must finish in under 10 minutes per system, because it runs
+  at every training validation step and on every PR. Covers the
+  Full-Duplex-Bench v1 and v1.5 harnesses on the
   public audio, the CueSpeak-style timed test with its scripted 2-minute
   user tracks, the fidelity, voice and naturalness measures, the frontier
   plots and the side-by-side renderer. Run the stock baseline for *both*
@@ -528,12 +606,11 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   author" and "content is actually in the journal" with the matching
   passages shown), and topic violations on the 20 baited prompts. Keep the
   judge call shape identical to `train_distill.task_judge`.
-- **#10.** Order of work: (1) voice: convert, split, stand up Pocket TTS
-  cloning from the prompt split, measure its similarity to the eval split
-  and record it in the plan doc (the voice ceiling; fine-tune Pocket TTS on
-  the training split if < 0.7); (2) passages: segment the journal into dated passages and run
-  the topic classifier, remove `sexuality`, `anger` and `borderline`, post
-  the counts; (3) questions and responses per section 1b, with the
+- **#10.** Training data only; voice splits, passages and topic exclusion
+  come from #22. Order of work: (1) Pocket TTS cloning from the prompt
+  split (fine-tune on the training split if #22's ceiling is < 0.7);
+  (2) train passages = the `other` pool minus #22's held-out passages;
+  (3) questions and responses per section 1b, with the
   mechanical validators (coverage ≥ 0.8, first person, no citations in
   spoken text, length, topic) in `data.py` with unit tests; (4) render
   responses with the author's TTS, questions with other voices, align with
@@ -557,9 +634,9 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   clones the prefix caches and, when the dialogue reaches
   `context_frames − p`, drops the oldest dialogue frames and re-prefills
   the window behind the pinned prefix (StreamingLLM layout, done
-  explicitly). This issue also owns `deploy.py`: the Modal app
-  `voice-serve` that runs the selected backend's own server with a
-  cartridge from a W&B artifact, separate from the cartridge gateway.
+  explicitly). `deploy.py` exists from #20/#21; this issue adds
+  `--system <cartridge artifact>` to it so a cartridge can be served and
+  the full eval re-run against it, which is how every training issue ends.
 - **#13.** Scope is smaller than the issue body says: the primary targets
   (author's-voice audio and aligned text) already come from #10. This issue
   produces the optional text-stream regulariser targets: teacher-force each
@@ -573,7 +650,13 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
 - **#14.** The loss is section 1b's, through the backend:
   `backend.sft_loss` (PersonaPlex: semantic codebook 1, acoustic 0.02,
   padded text 0.3; hertz: FSQ CE 1, GMM NLL 1, user channel 0) plus
-  `backend.distill_loss` at weight λ. One generic loop, two runs. Sweep the relative LR over four
+  `backend.distill_loss` at weight λ. One generic loop, two runs. Every
+  validation step runs the smoke eval through `backend.rollout` and logs
+  the section 4 metric names; the best checkpoint is picked on
+  `fidelity/judge` and `voice/speaker_sim` with the duplex metrics as
+  guards, not on loss alone. The issue ends with `voice deploy --system
+  <best artifact>` and `voice eval --size full` against it, in the
+  experiment group next to the baseline. Sweep the relative LR over four
   values and λ over {0, 0.5} with the same seed; pick on held-out SFT loss,
   stop early. Validation every step also runs 20 rollouts through Phonon-2
   for coverage and first-person rate, and UTMOS as the guard against
@@ -596,9 +679,10 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   `in_proj_weight`, gating `F.linear` and the depformer stacked weights
   before anything else; module-swap LoRA silently skips them. Merge, then
   rerun #14 and #15 on the merged weights as a follow-up issue.
-- **#18.** This is the `hertz` backend, a peer of #8, not a pilot:
-  `backends/hertz.py` implementing every protocol method, registered as
-  `"hertz"`. The head question is answered (section 4b): the LM emits
+- **#18.** The cartridge half of the `hertz` backend (#21 shipped the
+  inference half), one wave behind #8 so #8's lessons carry over:
+  `build_prefix`, `cartridge_from_prefill`, `forward`, `sft_loss`,
+  `distill_loss`, parity. The head question is answered (section 4b): the LM emits
   discrete FSQ tokens per channel, the resynthesizer a Gaussian mixture over
   32-d latents, so `sft_loss` = CE on the agent FSQ token at t+1 + GMM NLL
   on the agent latent at t+1, and `distill_loss` is KL on the agent FSQ
@@ -639,6 +723,10 @@ Until they are updated, this file wins. Specifically:
   now a full parallel track (#18 as the `hertz` backend; every later issue
   runs both backends).
 - Plan §3.5 is replaced by section 8's protocol.
+- Plan §4.5's phases are replaced by section 3's waves: inference and the
+  eval set first (#20, #21, #22), the harness and baselines as the wave-1
+  exit (#9), cartridge halves (#8, then #18) after that. The issue bodies
+  of #8, #9, #10, #12 and #18 were rewritten to match on 2026-10-29.
 
 The coordinator's first task is to edit those issue bodies and the plan to
 match this section, then post a comment on #7 saying it is done.
