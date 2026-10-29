@@ -238,9 +238,16 @@ image = (
         "pyarrow==25.0.1",
         "soundfile==0.14.0",
         "sentencepiece==0.2.2",
-        FORK,
+        # the fork's own deps at the versions of the root lock; its pins (torch<2.5,
+        # numpy<2.2, ...) are overridden there too ([tool.uv] override-dependencies)
+        "aiohttp==3.14.3",
+        "einops==0.9.0.dev0",
+        "huggingface-hub==1.32.0",
+        "sounddevice==0.5.0",
+        "sphn==0.1.12",
         pre=True,
     )
+    .uv_pip_install(FORK, extra_options="--no-deps")
     .add_local_python_source("voice", "shared")
 )
 
