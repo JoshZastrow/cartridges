@@ -178,18 +178,57 @@ def test_transport_against_served_app_until_context_full(backend):
         async with aiohttp.ClientSession() as session:
             await t.connect(session, server.url)
             got = []
+            stream = t.received()
             for _ in range(4):  # the fourth exceeds the cache
-                await t.send(np.full(CHUNK, 0.1, np.float32))
-                async for kind, pcm in t.received():
-                    got.append((kind, pcm.shape))
-                    break
+                sent = await t.send(np.full(CHUNK, 0.1, np.float32))
+                async for kind, item in stream:
+                    got.append((kind, item if kind == "wire" else item.shape))
+                    if kind == "audio":
+                        break
+            async for _ in stream:  # drains to the close
+                pass
             await t.close()
-        return got, t.closed_with
+        return got, t.closed_with, sent
 
     try:
-        got, closed = asyncio.run(talk())
+        got, closed, sent = asyncio.run(talk())
     finally:
         server.server.should_exit = True
         server.thread.join(5)
-    assert got == [("audio", (CHUNK,))] * 3
+    assert got == [("wire", sent), ("audio", (CHUNK,))] * 3  # same-size frames both ways
     assert closed[0] == 1011 and closed[1].startswith("context full")
+
+
+@pytest.mark.parametrize("bad", ["", "../x.wav", "a/b.wav", "/voice/x.wav", "..", "a\\b.wav", "x..wav"])
+def test_prompt_names_must_be_bare(bad):
+    from voice.deploy_hertz import safe_name
+
+    with pytest.raises(ValueError, match="bare file name"):
+        safe_name(bad)
+
+
+def test_prompt_path_and_proxy_headers(monkeypatch):
+    from voice.deploy_hertz import prompt_path
+    from voice.hertz_transport import proxy_auth_headers
+
+    assert prompt_path("prompt-30s.wav", False) == "/voice/prompt-30s.wav"
+    assert prompt_path("mine.wav", True) == "/voice/prompts/mine.wav"
+    monkeypatch.delenv("MODAL_PROXY_TOKEN_ID", raising=False)
+    assert proxy_auth_headers() == {}
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-1")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-2")
+    assert proxy_auth_headers() == {"Modal-Key": "wk-1", "Modal-Secret": "ws-2"}
+
+
+def test_server_takes_no_paths_from_clients(backend):
+    """The prompt is fixed at start-up from the operator's config (validated by
+    `prompt_path` in the serving process); the app's only routes take audio or nothing."""
+    routes = {r.path for r in make_app(backend).routes if not r.path.startswith(("/docs", "/openapi", "/redoc"))}
+    assert routes == {"/health", "/audio"}
+
+
+def test_transport_has_no_codec_hold():
+    """Raw PCM both ways: nothing is held before decode, so a reply's "wire"
+    arrival is its "audio" arrival (the end-to-end test checks the pairing)."""
+    assert HertzTransport.codec_hold_s == 0.0
+    assert (HertzTransport.sample_rate, HertzTransport.frame_size) == (16000, CHUNK)

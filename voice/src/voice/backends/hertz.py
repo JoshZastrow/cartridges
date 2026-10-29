@@ -14,10 +14,10 @@ Shapes (T = frames of one dialogue at 8 Hz):
     rollout / serve audio              float32 mono at 16 kHz, 2000 samples per frame
 
 The model code is upstream's (github.com/Standard-Intelligence/hertz-dev at
-`UPSTREAM_COMMIT`), imported from `HERTZ_DEV_DIR`, and runs only on CUDA with
-torch 2.5.x: its autocast contexts are hard-coded to "cuda". The Modal image in
-`voice.deploy_hertz` provides both. The workspace lock cannot pin torch 2.5.1
-(the root override wins), so the pin lives in that image.
+`UPSTREAM_COMMIT`), imported from `HERTZ_DEV_DIR`, and runs only on CUDA: its
+autocast contexts are hard-coded to "cuda". It runs unpatched on the workspace
+torch (2.14), not only on upstream's pinned 2.5.1; the difference was measured
+at the bf16 floor (#21). The Modal image is `voice.deploy_hertz.image`.
 
 Serving speaks upstream `inference_server.py`'s WebSocket protocol unchanged
 (`voice.hertz_transport`), and `HertzSession` runs its live path, minus two things: the
@@ -117,8 +117,6 @@ class HertzBackend:
         device = device or self.config.device
         if not (device.startswith("cuda") and torch.cuda.is_available()):
             raise RuntimeError(f"hertz-dev runs on CUDA only (upstream autocast is hard-coded to cuda); got {device!r}")
-        if not torch.__version__.startswith("2.5."):
-            raise RuntimeError(f"hertz-dev is pinned to torch 2.5.1; this is {torch.__version__}")
         if self.config.checkpoint != CHECKPOINT:
             raise ValueError(f"checkpoint must be {CHECKPOINT!r} (upstream load_ckpt hard-codes it)")
         sys.path.insert(0, os.environ.get("HERTZ_DEV_DIR", "/opt/hertz-dev"))

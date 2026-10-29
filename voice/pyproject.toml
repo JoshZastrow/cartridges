@@ -19,9 +19,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# hertz-dev serving (#21). torch==2.5.1, torchaudio==2.5.1 and einops==0.8.0 are pinned in the
-# hertz Modal image (voice.deploy_hertz), not here: the root override-dependencies (torch>=2.14.1)
-# would replace a pin in this extra, so the lock cannot hold hertz-dev's torch.
+# hertz-dev serving (#21). hertz-dev runs on the workspace torch; upstream's code is cloned
+# into the Modal image (voice.deploy_hertz.image), as it is not a package.
 hertz = ["aiohttp>=3.10.5", "fastapi>=0.115", "uvicorn>=0.32", "scipy>=1.13"]
 
 [project.scripts]
