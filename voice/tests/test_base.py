@@ -59,13 +59,18 @@ def test_frames_round_trip(tmp_path):
     assert all(torch.equal(f.tokens[k], g.tokens[k]) for k in f.tokens) and torch.equal(f.latents["agent"], g.latents["agent"])
 
 
-def test_targets_from_rows_and_loss_weights():
+def test_targets_from_rows_stacks_frames_per_stream():
     from shared.targets import TargetRow
 
-    row = TargetRow(label_id="l", task_id="d", stream="agent", prompt_ids=[], completion_ids=[1],
-                    topk_ids=[[1, 2]], topk_logprobs=[[-0.5, -1.0]])
-    t = Targets.from_rows([row])
-    assert t.topk_ids["agent"].dtype == torch.long and t.topk_logprobs["agent"].shape == (1, 2)
+    rows = [TargetRow(id="d", frame=f, stream=s, topk_ids=[f, f + 1], topk_logprobs=[-0.5, -1.0])
+            for s in ("agent", "agent_text") for f in (2, 0, 1)]  # out of order
+    t = Targets.from_rows(rows)
+    assert t.topk_ids["agent"].tolist() == [[0, 1], [1, 2], [2, 3]] and t.topk_logprobs["agent_text"].shape == (3, 2)
+    with pytest.raises(ValueError, match="frames are not"):
+        Targets.from_rows([rows[0], rows[1]])  # frames 2, 0: gap at 1
+
+
+def test_loss_weights():
     w = LossWeights(streams={"agent_text": 0.3}, default=0.02)
     assert (w.of("agent_text"), w.of("agent_audio_3")) == (0.3, 0.02)
 

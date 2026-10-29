@@ -1,24 +1,25 @@
 """Target shards: a teacher's top-k distillation targets as Parquet.
 
 Copied from `cartridges.cartridge.tasks.targets` (and `TargetRow` from
-`cartridges.cartridge.tasks.types`) at commit a9a7588. Changed: `TargetRow`
-has a `stream` column, so one shard can hold targets for several output
+`cartridges.cartridge.tasks.types`) at commit a9a7588. Changed: a row is one
+frame of one stream of one sequence (the voice brief section 5 contract),
+not one whole sequence, so one shard can hold targets for several output
 streams of a multi-stream model (the voice project's `agent_text` or `agent`
 FSQ stream; "text" for a plain LM); the shard root and the Volume mounts are
 parameters instead of the cartridge Volume's paths; the cartridge-only
 label/Example readers are not copied.
 
-One row per (sequence, stream):
+One row per (id, frame, stream):
 
-    label_id, task_id   str        ids of the target and of the input it was made for
-    stream              str        output stream the targets predict
-    prompt_ids          [P] int32  the student's input tokens ([] when the input is not tokens)
-    completion_ids      [T] int32  the target tokens on `stream`
-    topk_ids            [T, k] int32    teacher's top-k ids of the distribution predicting completion_ids[t]
-    topk_logprobs       [T, k] float32  their logprobs
+    id              str          the sequence (dialogue) the target was made for
+    frame           int32        position t in that sequence
+    stream          str          output stream the targets are for
+    topk_ids        [k] int32    teacher's top-k ids at position t (k = 20 in the voice project)
+    topk_logprobs   [k] float32  their logprobs
 
-Position t is frame t for a frame-synchronous stream. Full-vocabulary logits
-are not stored. Shards live at <root>/<run_id>/part-NNNNN.parquet.
+The teacher's distribution at position t predicts frame t+1 (next-frame), the
+same alignment as the student's logits. Full-vocabulary logits are not stored.
+Shards live at <root>/<run_id>/part-NNNNN.parquet.
 """
 
 from __future__ import annotations
@@ -34,23 +35,19 @@ from pydantic import BaseModel, ConfigDict
 class TargetRow(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    label_id: str
-    task_id: str
+    id: str
+    frame: int
     stream: str = "text"
-    prompt_ids: list[int]
-    completion_ids: list[int]
-    topk_ids: list[list[int]]
-    topk_logprobs: list[list[float]]
+    topk_ids: list[int]
+    topk_logprobs: list[float]
 
 
 SCHEMA = pa.schema([
-    ("label_id", pa.string()),
-    ("task_id", pa.string()),
+    ("id", pa.string()),
+    ("frame", pa.int32()),
     ("stream", pa.string()),
-    ("prompt_ids", pa.list_(pa.int32())),
-    ("completion_ids", pa.list_(pa.int32())),
-    ("topk_ids", pa.list_(pa.list_(pa.int32()))),
-    ("topk_logprobs", pa.list_(pa.list_(pa.float32()))),
+    ("topk_ids", pa.list_(pa.int32())),
+    ("topk_logprobs", pa.list_(pa.float32())),
 ])
 
 
@@ -63,7 +60,7 @@ def shard_uri(run_id: str, part: int | str, root: str | Path) -> str:
 
 
 def write_shard(rows: Sequence[TargetRow], uri: str | Path) -> str:
-    """Write rows to one Parquet shard (row i = targets_row i); returns the uri."""
+    """Write rows to one Parquet shard; returns the uri."""
     columns = {name: [getattr(row, name) for row in rows] for name in SCHEMA.names}
     path = Path(uri)
     path.parent.mkdir(parents=True, exist_ok=True)

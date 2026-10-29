@@ -58,11 +58,16 @@ def test_init_from_saved_cartridge(tmp_path, data):
     assert again["best_val"] == pytest.approx(first["best_val"], abs=1e-5)
 
 
+def teacher_rows(f: Frames, shift: int = 1) -> list[TargetRow]:
+    """A teacher sure of agent[t + shift] at position t (shift=1 is next-frame)."""
+    agent = f.tokens["agent"].tolist()
+    n = len(agent) - 1
+    return [TargetRow(id=f.id, frame=t, stream="agent", topk_ids=[agent[(t + shift) % len(agent)]], topk_logprobs=[0.0])
+            for t in range(n)]
+
+
 def test_distillation_term_uses_stored_targets(tmp_path, data):
-    frames = [Frames.load(p) for p in data[0] + data[1]]
-    rows = [TargetRow(label_id="l", task_id=f.id, stream="agent", prompt_ids=[], completion_ids=f.tokens["agent"].tolist(),
-                      topk_ids=[[t, (t + 1) % 8] for t in f.tokens["agent"].tolist()],
-                      topk_logprobs=[[-0.1, -2.5]] * len(f.tokens["agent"])) for f in frames]
+    rows = [r for p in data[0] + data[1] for r in teacher_rows(Frames.load(p))]
     shard = write_shard(rows, tmp_path / "targets/run/part-00000.parquet")
     cfg = config(tmp_path, data, targets=[shard], distill_weight=0.5, max_steps=5, val_every=5)
     result = train(cfg)
@@ -71,19 +76,18 @@ def test_distillation_term_uses_stored_targets(tmp_path, data):
     assert val["distill"] > 0 and val["total"] == pytest.approx(val["agent"] + 0.5 * val["distill"], rel=1e-5)
 
 
-def test_sft_and_distill_losses_share_one_alignment(tmp_path):
-    """A teacher putting all mass on the true frame t makes the distill loss at
-    position t equal the SFT cross-entropy at position t."""
+def test_sft_and_distill_losses_share_next_frame_alignment(tmp_path):
+    """Position t predicts frame t+1 in both losses: a one-hot teacher on frame t+1
+    at row t makes the distill loss equal the SFT loss; off by one either way, it does not."""
     backend = FakeBackend(FakeConfig())
     frames = Frames.load(fixture(tmp_path, n=1)[0])
     with torch.no_grad():
         out = backend.forward(frames, backend.cartridge_from_prefill(backend.build_prefix(None, "", "")))
-    agent = frames.tokens["agent"]
-    targets = Targets(topk_ids={"agent": agent[:, None]}, topk_logprobs={"agent": torch.zeros(len(agent), 1)})
-    sft = backend.sft_loss(out, frames, LossWeights())["agent"]
-    assert float(backend.distill_loss(out, targets)) == pytest.approx(float(sft), rel=1e-6)
-    shifted = Targets(topk_ids={"agent": agent.roll(-1)[:, None]}, topk_logprobs=targets.topk_logprobs)
-    assert float(backend.distill_loss(out, shifted)) != pytest.approx(float(sft), rel=1e-3)
+    sft = float(backend.sft_loss(out, frames, LossWeights())["agent"])
+    distill = {shift: float(backend.distill_loss(out, Targets.from_rows(teacher_rows(frames, shift))))
+               for shift in (0, 1, 2)}
+    assert distill[1] == pytest.approx(sft, rel=1e-6)
+    assert distill[0] != pytest.approx(sft, rel=1e-3) and distill[2] != pytest.approx(sft, rel=1e-3)
 
 
 def test_kl_to_topk_is_zero_when_student_matches():

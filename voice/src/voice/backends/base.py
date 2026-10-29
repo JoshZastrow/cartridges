@@ -7,17 +7,17 @@ Shapes (T = frames of one dialogue at `spec.frame_rate_hz`, p = prefix frames):
 
     Frames.tokens[stream]    [T] int      discrete streams (text, audio codebook, FSQ index)
     Frames.latents[stream]   [T, D] float continuous streams (hertz only)
-    Outputs.logits[stream]   [B, T, V]    agent discrete streams; position t predicts frame t
+    Outputs.logits[stream]   [B, T, V]    agent discrete streams; position t predicts frame t+1
     Outputs.gmm[stream]      GMMParams    agent latent streams (hertz only)
-    Targets.topk_*[stream]   [T, k]       stored teacher top-k for frame t
+    Targets.topk_*[stream]   [N, k]       teacher top-k at position t (predicts frame t+1)
     KVGroup.keys[l]          [1, H, p, D] per layer; the prefix axis is dim 2
 
-Alignment, one convention for every backend and both losses: position t of
-`Outputs` is the model's prediction *for frame t*, computed from frames < t
-(and the prefix); `Targets[t]` is the teacher's distribution for frame t. So
-`sft_loss` scores logits[:, t] against tokens[t] and `distill_loss` pairs
-logits[:, t] with Targets[t]. A backend whose native head predicts t+1 from
-position t shifts inside `forward`, not in the losses.
+Alignment, one convention for every backend and both losses (next-frame, as
+PersonaPlex and hertz-dev train): position t of `Outputs` has seen frames <= t
+(and the prefix) and predicts frame t+1. A target row with frame=t holds the
+teacher's distribution at position t, so it predicts frame t+1 too. So
+`sft_loss` scores logits[:, t] against tokens[t+1] (the last position has no
+label) and `distill_loss` pairs logits[:, t] with Targets[t].
 
 A `Cartridge` is the trainable prefix: one `KVGroup` per name in
 `spec.cache_groups` (PersonaPlex: "temporal"; hertz: "lm", "resyn"). The first
@@ -124,18 +124,30 @@ class Frames(BaseModel):
 
 
 class Targets(BaseModel):
-    """A teacher's stored top-k for one dialogue, per discrete agent stream."""
+    """A teacher's stored top-k for one dialogue, per discrete agent stream.
+    Row t is the teacher's distribution at position t, which predicts frame t+1."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    topk_ids: dict[str, Tensor]  # [T, k] long
-    topk_logprobs: dict[str, Tensor]  # [T, k] float
+    topk_ids: dict[str, Tensor]  # [N, k] long, N <= T
+    topk_logprobs: dict[str, Tensor]  # [N, k] float
 
     @classmethod
     def from_rows(cls, rows) -> Targets:
-        """From the `shared.targets.TargetRow`s of one dialogue (one per stream)."""
-        return cls(topk_ids={r.stream: torch.tensor(r.topk_ids, dtype=torch.long) for r in rows},
-                   topk_logprobs={r.stream: torch.tensor(r.topk_logprobs, dtype=torch.float32) for r in rows})
+        """From the per-frame `shared.targets.TargetRow`s of one dialogue: rows
+        grouped by stream and stacked in frame order. Each stream's frames must
+        be 0..N-1 with no gaps."""
+        by_stream: dict[str, list] = {}
+        for r in rows:
+            by_stream.setdefault(r.stream, []).append(r)
+        ids, lps = {}, {}
+        for stream, rs in by_stream.items():
+            rs.sort(key=lambda r: r.frame)
+            if [r.frame for r in rs] != list(range(len(rs))):
+                raise ValueError(f"stream {stream!r} of {rs[0].id!r}: frames are not 0..{len(rs) - 1}")
+            ids[stream] = torch.tensor([r.topk_ids for r in rs], dtype=torch.long)
+            lps[stream] = torch.tensor([r.topk_logprobs for r in rs], dtype=torch.float32)
+        return cls(topk_ids=ids, topk_logprobs=lps)
 
 
 class GMMParams(NamedTuple):

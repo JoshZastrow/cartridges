@@ -6,7 +6,7 @@ only (`shared.optim`), loop over `Frames` shards, and minimise
     loss = sum(backend.sft_loss(out, frames, w).values()) + distill_weight * backend.distill_loss(out, targets)
 
 where the distillation term applies to dialogues that have stored teacher
-targets (`shared.targets` shards, task_id = dialogue id). Every `val_every`
+targets (`shared.targets` shards, row id = dialogue id). Every `val_every`
 steps: held-out loss over `val_frames`, an optional smoke eval, early stopping
 on the held-out loss (the best cartridge is saved to <out_dir>/best). At the
 end the best cartridge is logged as the W&B artifact `voice-cartridge`
@@ -53,7 +53,7 @@ class TrainConfig(BaseModel):
 
     train_frames: list[str] = []  # Frames files, or directories of *.safetensors
     val_frames: list[str] = []
-    targets: list[str] = []  # shared.targets shard uris
+    targets: list[str] = []  # shared.targets shard uris (row id = dialogue id)
     targets_root: str | None = None  # where Volume-relative target uris resolve
     distill_weight: float = 0.0  # lambda
     loss_weights: LossWeights = LossWeights()
@@ -103,7 +103,7 @@ def load_targets(uris: list[str], root: str | None) -> dict[str, Targets]:
 
     by_id: dict[str, list] = {}
     for row in read_shards(uris, root=root):
-        by_id.setdefault(row.task_id, []).append(row)
+        by_id.setdefault(row.id, []).append(row)
     return {k: Targets.from_rows(rows) for k, rows in by_id.items()}
 
 
