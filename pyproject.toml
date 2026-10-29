@@ -37,6 +37,7 @@ build-backend = "uv_build"
 
 [tool.uv]
 prerelease = "allow"
+override-dependencies = ["torch>=2.14.1", "numpy>=2", "huggingface-hub>=1", "safetensors>=0.4", "aiohttp>=3.10.5", "einops>=0.7", "sentencepiece>=0.2", "transformers>=5.10.4,<5.18"]
 
 [dependency-groups]
 dev = [
@@ -46,3 +47,6 @@ dev = [
     "transformers>=5.10.4,<5.18",
     "wandb-workspaces>=0.4.13",
 ]
+
+[tool.uv.workspace]
+members = ["voice", "shared"]

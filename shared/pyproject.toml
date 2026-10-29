@@ -1,0 +1,18 @@
+[project]
+name = "shared"
+version = "0.1.0"
+description = "Components the cartridge and voice projects both need, copied out of cartridges"
+requires-python = ">=3.13"
+dependencies = [
+    "modal>=1.5.6.dev19",
+    "pyarrow>=18",
+    "pydantic>=2.14.0b2",
+    "wandb>=0.30.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.0.0", "torch>=2.14.1"]
