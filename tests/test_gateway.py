@@ -134,3 +134,54 @@ def test_unknown_model_is_404():
     assert response.status_code == 404
     assert response.json()["error"]["type"] == "invalid_request_error"
     assert "gpt-9" in response.json()["error"]["message"]
+
+
+def live_client(calls: list, fail_after: int | None = None) -> TestClient:
+    """A gateway with streaming backends that yield two deltas and a final event
+    (or raise after `fail_after` deltas)."""
+
+    def events(*args, **kwargs):
+        calls.append((args, kwargs))
+        for i, (text, tokens) in enumerate([("Hel", 1), ("lo.", 2)]):
+            if i == fail_after:
+                raise RuntimeError("container died")
+            yield {"text": text, "tokens": tokens}
+        yield {"finish_reason": "stop", "prompt_tokens": 7, "completion_tokens": 3}
+
+    def unused(*args, **kwargs):
+        raise AssertionError("stream requests must not use the blocking backends")
+
+    return TestClient(build_app(unused, unused, api_key="key", teacher_stream=events, cartridge_stream=events))
+
+
+def stream_lines(client: TestClient, model: str) -> list[str]:
+    with client.stream("POST", "/v1/chat/completions", json=chat(model, stream=True), headers=AUTH) as response:
+        assert response.status_code == 200
+        return [line for line in response.iter_lines() if line]
+
+
+def test_live_stream_sends_each_event_with_its_token_count():
+    calls: list = []
+    lines = stream_lines(live_client(calls), "journal-teacher-27b")
+    assert lines[-1] == "data: [DONE]"
+    chunks = [json.loads(line.removeprefix("data: ")) for line in lines[:-1]]
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+    assert [(c["choices"][0]["delta"]["content"], c["tokens"]) for c in chunks[1:3]] == [("Hel", 1), ("lo.", 2)]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"] == {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+    assert calls == [(("Qwen/Qwen3.8-27B", True, [{"role": "user", "content": "hi"}], 1024, None), {})]
+
+
+def test_live_stream_passes_the_cartridge_gpu():
+    calls: list = []
+    stream_lines(live_client(calls), "journal-cartridge-27b-am")
+    (args, kwargs), = calls
+    assert args[0] == CHAT_MODELS["journal-cartridge-27b-am"].cartridge and kwargs == {"gpu": "H200"}
+
+
+def test_live_stream_failure_is_an_error_event_then_done():
+    lines = stream_lines(live_client([], fail_after=1), "journal-cartridge-27b-am")
+    assert lines[-1] == "data: [DONE]"
+    events = [json.loads(line.removeprefix("data: ")) for line in lines[:-1]]
+    assert events[1]["choices"][0]["delta"]["content"] == "Hel"
+    assert events[-1]["error"]["code"] == 502 and "container died" in events[-1]["error"]["message"]

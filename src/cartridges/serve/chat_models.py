@@ -19,6 +19,7 @@ class ChatModel(BaseModel, frozen=True):
     model_id: str | None = None  # teacher backend
     with_context: bool = False  # teacher backend: journal context block in the prompt
     cartridge: str | None = None  # cartridge backend: volume path
+    gpu: str | None = None  # cartridge backend: CartridgeServer GPU (None: its L4 default)
 
 
 CHAT_MODELS: dict[str, ChatModel] = {
@@ -28,6 +29,8 @@ CHAT_MODELS: dict[str, ChatModel] = {
         ChatModel(id="journal-teacher-4b", backend="teacher", model_id="Qwen/Qwen3.5-4B", with_context=True),
         ChatModel(id="qwen3.5-4b-base", backend="teacher", model_id="Qwen/Qwen3.5-4B", with_context=False),
         ChatModel(id="journal-cartridge-4b-smoke", backend="cartridge", cartridge=SMOKE_CARTRIDGE),
+        ChatModel(id="journal-cartridge-27b-am", backend="cartridge", gpu="H200",
+                  cartridge="/vol/cartridges/exp-20261027-am-stage2/onpolicy-best"),  # attention-matched init, stage 2
         ChatModel(id="mock-echo", backend="mock"),
     ]
 }

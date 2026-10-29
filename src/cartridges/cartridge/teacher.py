@@ -542,6 +542,29 @@ class Teacher:
         })
         return completions
 
+    @modal.method()
+    async def generate_stream(
+        self, messages: list[dict], max_tokens: int = 512, with_context: bool = True, temperature: float | None = None,
+    ):
+        """`generate` for one answer, streamed (call with .remote_gen): yields
+        {text, tokens} for each engine step's new tokens (vLLM DELTA outputs),
+        then {finish_reason, prompt_tokens, completion_tokens}."""
+        from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
+
+        _, prompt_ids = render(self.tokenizer, messages)
+        full = (self.prefix_ids if with_context else []) + prompt_ids
+        params = self.SamplingParams(**sampling_kwargs(1, max_tokens, 0, temperature, None, None, StructuredOutputsParams),
+                                     output_kind=RequestOutputKind.DELTA)
+        n, finish_reason, t0 = 0, None, time.perf_counter()
+        async for out in self.engine.generate(self.TokensPrompt(prompt_token_ids=full), params, uuid.uuid4().hex):
+            choice = out.outputs[0]
+            n += len(choice.token_ids)
+            finish_reason = choice.finish_reason or finish_reason
+            if choice.token_ids:
+                yield {"text": choice.text, "tokens": len(choice.token_ids)}
+        self.run.log({"gen/latency_s": time.perf_counter() - t0, "gen/prompt_tokens": len(full), "gen/output_tokens": n})
+        yield {"finish_reason": finish_reason, "prompt_tokens": len(prompt_ids), "completion_tokens": n}
+
     @modal.exit()
     def stop(self):
         self.run.finish()

@@ -1,0 +1,23 @@
+{
+  "name": "cartridges-demo",
+  "private": true,
+  "type": "module",
+  "description": "Side-by-side streaming: the Teacher (full journal) and the cartridge, through the gateway",
+  "scripts": {
+    "start": "tsx src/cli.tsx",
+    "test": "tsx --test src/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ink": "5.2.1",
+    "ink-text-input": "6.0.0",
+    "react": "18.3.1",
+    "wrap-ansi": "9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "18.3.12",
+    "tsx": "4.19.2",
+    "typescript": "5.6.3"
+  }
+}

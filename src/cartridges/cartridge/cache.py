@@ -29,6 +29,7 @@ Artifact: a directory with `cartridge.safetensors` and `cartridge.json`.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import torch
@@ -232,6 +233,25 @@ class Cartridge(nn.Module):
                        temperature, top_p, eos_token_id, generator)
 
     @torch.no_grad()
+    def stream(
+        self,
+        model,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 256,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        eos_token_id: int | list[int] | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Iterator[int]:
+        """`generate` for one prompt ([1, L]), one token id at a time as each is
+        sampled. Stops after the first EOS id, which it yields."""
+        out = self(model, input_ids, read_only=False)
+        pos = torch.full((1,), self.p + input_ids.shape[1], device=input_ids.device)
+        for nxt in _steps(model, out.past_key_values, out.logits[:, -1].float(), pos, None, max_new_tokens,
+                          temperature, top_p, eos_token_id, generator):
+            yield nxt.item()
+
+    @torch.no_grad()
     def generate_batch(
         self,
         model,
@@ -365,16 +385,23 @@ def _decode(model, cache, logits: torch.Tensor, pos: torch.Tensor, mask: torch.T
     """Sample up to max_new_tokens per row from `logits` [B, V] onward. `pos` [B]:
     each row's next position; `mask` [B, cache length] (None: no padding) gains a
     column per new token. Rows that hit EOS keep emitting the first EOS id."""
+    tokens = list(_steps(model, cache, logits, pos, mask, max_new_tokens, temperature, top_p, eos_token_id, generator))
+    return torch.stack(tokens, dim=1) if tokens else torch.zeros(logits.shape[0], 0, dtype=torch.long, device=logits.device)
+
+
+def _steps(model, cache, logits: torch.Tensor, pos: torch.Tensor, mask: torch.Tensor | None, max_new_tokens: int,
+           temperature: float, top_p: float, eos_token_id, generator) -> Iterator[torch.Tensor]:
+    """_decode one step at a time: yields each step's [B] tokens as soon as they
+    are sampled, before the forward pass for the next step."""
     B, device = logits.shape[0], logits.device
     eos = torch.tensor([eos_token_id] if isinstance(eos_token_id, int) else (eos_token_id or []), device=device)
     done = torch.zeros(B, dtype=torch.bool, device=device)
-    tokens = []
     for _ in range(max_new_tokens):
         nxt = sample(logits, temperature, top_p, generator)
         if eos.numel():
             nxt = torch.where(done, eos[0], nxt)
             done |= torch.isin(nxt, eos)
-        tokens.append(nxt)
+        yield nxt
         if done.all():
             break
         if mask is not None:
@@ -383,7 +410,6 @@ def _decode(model, cache, logits: torch.Tensor, pos: torch.Tensor, mask: torch.T
                     use_cache=True)
         cache, pos = out.past_key_values, pos + 1
         logits = out.logits[:, -1].float()
-    return torch.stack(tokens, dim=1) if tokens else torch.zeros(B, 0, dtype=torch.long, device=device)
 
 
 def sample(logits: torch.Tensor, temperature: float, top_p: float, generator: torch.Generator | None = None) -> torch.Tensor:

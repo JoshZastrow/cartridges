@@ -264,6 +264,8 @@ class Cli:
             backends.teacher_generate,
             backends.cartridge_generate,
             api_key=os.environ.get("GATEWAY_API_KEY", DEFAULT_API_KEY),
+            teacher_stream=backends.teacher_stream,
+            cartridge_stream=backends.cartridge_stream,
         )
         uvicorn.run(web, host=host, port=port)
 

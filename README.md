@@ -240,6 +240,24 @@ uv run cartridges cartridge_train --init_cartridge <stage-1 checkpoint> --label_
 
 The journal data is private and is not in this repository.
 
+## Side-by-side demo
+
+`demo/` is a terminal app that sends one prompt to the Teacher and to the cartridge and streams both answers side by side.
+Each pane shows decode tokens/s, total time and time to first token.
+It talks to the gateway, which streams tokens as the models sample them.
+
+```bash
+uv run modal deploy -m cartridges.cartridge.teacher            # once, after changing the Modal classes
+uv run modal deploy -m cartridges.cartridge.serve_cartridge
+uv run cartridges gateway_serve --port 8008                    # terminal 1
+cd demo && npm install && npm start                            # terminal 2; --prompt "..." to start with a question
+```
+
+Both models run on an H200 (about $4.54/h each), and each container stays up 5 minutes after its last request.
+The first request warms both containers, which can take several minutes.
+The two engines differ: the Teacher decodes with vLLM, and the cartridge decodes with plain Hugging Face, one token at a time.
+So the latency gap mixes the engine with the size of the context.
+
 ## Prepare data
 
 The `prepare-data` command runs a Prefect flow by default:

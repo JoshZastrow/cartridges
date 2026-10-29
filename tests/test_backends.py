@@ -53,7 +53,7 @@ def test_teacher_generate_maps_completion_and_passes_the_options(monkeypatch):
 def test_cartridge_generate_builds_generation_from_the_dict(monkeypatch):
     result = {"text": "Cat Stevens", "finish_reason": "length", "prompt_tokens": 30, "completion_tokens": 128}
     call, spawned = FakeCall(result=result), []
-    monkeypatch.setattr(backends, "cartridge_handle", lambda cartridge: _handle(call, spawned))
+    monkeypatch.setattr(backends, "cartridge_handle", lambda cartridge, gpu=None: _handle(call, spawned))
 
     out = backends.cartridge_generate("/vol/cartridges/x", MESSAGES, 128, None)
     assert out == backends.Generation(**result)
@@ -78,7 +78,7 @@ def test_transport_failures_become_transient_errors(monkeypatch, error):
 
 def test_get_timeout_cancels_the_call_and_is_transient(monkeypatch):
     call = FakeCall(error=TimeoutError())  # what FunctionCall.get(timeout=...) raises
-    monkeypatch.setattr(backends, "cartridge_handle", lambda cartridge: _handle(call, []))
+    monkeypatch.setattr(backends, "cartridge_handle", lambda cartridge, gpu=None: _handle(call, []))
     with pytest.raises(backends.TransientBackendError):
         backends.cartridge_generate("/vol/cartridges/x", MESSAGES, 8, None, timeout_s=1)
     assert call.cancelled
@@ -132,4 +132,5 @@ def test_cartridge_cls_makes_one_pool_per_path(monkeypatch):
     assert serve_cartridge.cartridge_cls("/vol/cartridges/x") == {"cartridge": "/vol/cartridges/x"}
     assert made == [(serve_cartridge.APP_NAME, "CartridgeServer"), ("params", {"cartridge": "/vol/cartridges/x"})]
     serve_cartridge.cartridge_cls(gpu="A100-80GB")
-    assert made[-2:] == [("options", {"gpu": "A100-80GB"}), ("params", {"cartridge": serve_cartridge.SMOKE_CARTRIDGE})]
+    assert made[-2:] == [("options", {"gpu": "A100-80GB"}),
+                         ("params", {"cartridge": serve_cartridge.SMOKE_CARTRIDGE, "gpu": "A100-80GB"})]
