@@ -1,9 +1,11 @@
-"""`voice` command line: encode | train | eval | report | deploy, each with --backend.
+"""`voice` command line: encode | train | eval | report | deploy | serve-local, each with --backend.
 
     uv run voice train --config sft.toml [--dry-run]
+    uv run voice deploy --backend personaplex --system stock     # Modal app voice-serve; prints the WebSocket URL
+    uv run voice serve-local --backend personaplex [--port 8998] # the same server on this machine's GPU
 
-Only `train` is implemented here (#19); the rest are stubs naming the issue
-that ships them.
+`train` (#19), `deploy` and `serve-local` (#20) are implemented; the rest are
+stubs naming the issue that ships them.
 """
 
 from __future__ import annotations
@@ -19,19 +21,23 @@ STUBS = {
     "encode": "#10 (data) and #8/#18 (backend encoders)",
     "eval": "#9",
     "report": "#9",
-    "deploy": "#20/#21 (stock) and #12 (cartridge)",
 }
 
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="voice", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="command", required=True)
-    for name in ("encode", "train", "eval", "report", "deploy"):
+    for name in ("encode", "train", "eval", "report", "deploy", "serve-local"):
         s = sub.add_parser(name)
-        s.add_argument("--backend", choices=NAMES, default=None)
+        s.add_argument("--backend", choices=NAMES, default=None, required=name in ("deploy", "serve-local"))
         if name == "train":
             s.add_argument("--config", help="TOML file of voice.train.TrainConfig")
             s.add_argument("--dry-run", action="store_true", help="CPU, FakeBackend, tiny fixture, W&B disabled")
+        if name == "deploy":
+            s.add_argument("--system", default="stock", help="stock, or a cartridge artifact (#12)")
+            s.add_argument("--dry-run", action="store_true", help="no Modal calls; print the URL shape")
+        if name == "serve-local":
+            s.add_argument("--port", type=int, default=8998)
     return p
 
 
@@ -60,6 +66,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "train":
         return train_command(args)
+    if args.command in ("deploy", "serve-local"):
+        from voice.deploy import FUNCTIONS, deploy, serve_local
+
+        if args.backend not in FUNCTIONS:
+            print(f"voice {args.command} --backend {args.backend}: not implemented yet; served: {sorted(FUNCTIONS)}",
+                  file=sys.stderr)
+            return 2
+        if args.command == "serve-local":
+            return serve_local(args.backend, args.port)
+        try:
+            print(deploy(args.backend, args.system, args.dry_run))
+        except NotImplementedError as e:
+            print(f"voice deploy: {e}", file=sys.stderr)
+            return 2
+        return 0
     print(f"voice {args.command}: not implemented yet; ships with {STUBS[args.command]}", file=sys.stderr)
     return 2
 

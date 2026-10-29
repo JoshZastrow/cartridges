@@ -5,7 +5,7 @@
 Importing this package registers every backend module listed below.
 """
 
-from voice.backends import fake  # noqa: F401  (registers "fake")
+from voice.backends import fake, personaplex  # noqa: F401  (register "fake", "personaplex")
 from voice.backends.registry import BackendConfig, get, parse_config, register, registered
 
 __all__ = ["BackendConfig", "get", "parse_config", "register", "registered"]
