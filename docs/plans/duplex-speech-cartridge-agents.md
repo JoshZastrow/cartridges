@@ -832,30 +832,154 @@ same user-channel audio and the same judge prompt are used for every
 system in a comparison. A checkpoint is reported only with its baseline row.
 No metric is added to the table without a baseline number for it.
 
-## 9. Kick-off prompt for an implementer
+## 9. Kick-off: orchestrating the agent team
+
+The epic runs as one Claude Code **agent team**: the coordinator is the
+team lead, implementers are named teammates, and the reviewer is a
+teammate too. Teams are enabled in the author's settings
+(`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`); they need an interactive
+session, not `-p`. The GitHub board stays the source of truth across
+sessions; the team's shared task list is the within-session mirror of it.
+
+### 9.1 Before spawning
+
+1. Start the lead in this repo on `docs/readme-cartridge` (or `main` once
+   merged), interactive, in-process display mode (split panes only if
+   already inside tmux or iTerm2 with `it2`).
+2. Pre-approve the commands teammates will run, or permission prompts for
+   every teammate bubble up to the lead and stall the team. Minimum:
+   `Bash(uv *)`, `Bash(git *)`, `Bash(gh *)`, `Bash(modal *)`,
+   `Bash(pytest *)`, `Bash(phonon *)`, read/write under `voice/`, `shared/`,
+   `docs/plans/`. Never pre-approve `rm -rf`, pushes to `main`, or anything
+   under `data/`.
+3. Quality gates as hooks: `TaskCompleted` runs
+   `uv run --package voice pytest -q` and `uv run pytest -q` (root
+   unchanged) and exits 2 on failure so the task stays open;
+   `TeammateIdle` exits 2 with "post the summary comment and set Status to
+   Review before idling" if the teammate's issue is still In Progress.
+4. Optional reusable roles in `.claude/agents/`: `voice-implementer.md`
+   (tools: Read, Write, Edit, Bash, Grep, Glob; body = section 7 protocol)
+   and `voice-reviewer.md` (tools: Read, Grep, Glob, Bash; body = "review
+   only against the issue's acceptance list and section 5 contracts").
+   Spawn teammates by those types so every teammate gets the same rules.
+
+### 9.2 How the team maps onto the board
+
+- **One task per issue** in the shared task list, named `#N <title>`, with
+  the issue's "Blocked by" mirrored as task dependencies, so blocked tasks
+  show as blocked and nobody self-claims them early.
+- **One teammate per In Progress issue**, named `impl-N` (`impl-19`,
+  `impl-20`, …), so later prompts can address it. A teammate owns exactly
+  the files its issue lists; two teammates never share a file.
+- **Each teammate works in its own git worktree** on `issue-N-<slug>`.
+  In-process teammates share the lead's working directory, so the first
+  thing a teammate does is `git worktree add ../cartridges-issue-N
+  -b issue-N-<slug>` and `cd` there; it never edits the lead's checkout.
+- **Claiming** still happens on GitHub (assign, Status In Progress, claim
+  comment, race check) *and* on the task list (claim the task). The board
+  wins if they disagree.
+- **Done** = the issue's acceptance list checked, hooks green, PR open with
+  `Closes #N`, Status Review, summary comment; then the teammate marks the
+  task completed, which unblocks dependents in the task list. The lead
+  flips the board when the PR merges.
+- **Team size**: 3–5 teammates at once, matching the wave widths in
+  section 3. Wave 0 is one teammate; wave 1a is three; never more than
+  four implementers plus one reviewer.
+
+### 9.3 Lead prompt (paste into the lead session)
 
 ```
 Read CLAUDE.md, docs/plans/duplex-speech-cartridge.md and
-docs/plans/duplex-speech-cartridge-agents.md. Claim issue #<N> on the
-Cartridges board per CLAUDE.md, work in a worktree on branch
-issue-<N>-<slug>, and build only that issue's acceptance criteria using the
-interface contracts in the agents file. All code goes under voice/ or
-shared/; never edit src/cartridges/. Run the CPU tests and the --dry-run
-before any Modal GPU run; stay under the $40 cap. When done, open a PR with
-"Closes #<N>", set Status to Review, and post a summary comment with the
-numbers and anything the next issue needs. Do not edit files owned by
-another In Progress issue without commenting there first.
+docs/plans/duplex-speech-cartridge-agents.md. You are the team lead and
+coordinator for epic #7 (speech cartridge: PersonaPlex and hertz-dev,
+evaluation-driven, inference first). Rules:
+
+1. First, edit the plan and the bodies of #13 and #16 per the brief's
+   section 6b so they match sections 1b, 3 and 4b, and comment on #7.
+2. Build the shared task list: one task per issue #8–#22, named
+   "#N <title>", with the issue's "Blocked by" set as dependencies.
+3. Spawn teammates only for issues whose Status is Ready, at most four
+   implementers at once, named impl-N, using the voice-implementer agent
+   type when it exists. Give each the spawn prompt in section 9.4 with its
+   issue number filled in. Spawn one reviewer teammate named reviewer
+   using the voice-reviewer type; it reviews every PR against the issue's
+   acceptance list and the section 5 contracts and messages the
+   implementer with findings.
+4. Do not write feature code yourself. Wait for teammates; synthesize
+   their summary comments; when a PR is approved and merged, set the
+   issue's Status to Done, flip newly unblocked issues to Ready, and
+   spawn the next teammates.
+5. Keep section 5 (interface contracts) of the brief current when a
+   summary comment reports a change, and message every teammate whose
+   issue consumes that contract.
+6. Enforce the wave-1 exit criterion before anything in wave 2 starts:
+   two stock baseline rows in W&B from `voice eval --size full` against
+   `voice-serve`, and a smoke eval under 10 minutes per system.
+7. Confirm GPU budget with the author before wave 4 (training). Post
+   every teammate's reported cost in a running total on #7.
+8. If a teammate idles without a summary comment or a task stays
+   "in progress" after its PR is open, message it to finish; if it stopped
+   on an error, read its transcript and either message it the fix or spawn
+   a replacement with the same name and the same prompt.
+9. Never let a teammate edit src/cartridges/, data/, or another In
+   Progress issue's files. If one asks, say no and point at the owning
+   issue.
+10. Shut down a teammate by name when its issue is Done and nothing is
+    Ready for it; the team ends when #7's task list is complete.
 ```
 
-Kick-off prompt for the coordinator:
+### 9.4 Teammate spawn prompt (the lead fills in N)
 
 ```
-Read CLAUDE.md and docs/plans/duplex-speech-cartridge-agents.md. You are
-the coordinator for epic #7. First, update the issue bodies and the plan
-per section 6b so they match section 1b (first-person retelling in the
-author's voice and words, topic exclusions, Pocket TTS targets) and comment
-on #7 when done. Then keep the board truthful: flip issues to Ready when
-their blockers are Done, review summary comments against the interface
-contracts in section 5, keep that section current, and confirm GPU budget
-with the author before wave 3. Do not write feature code.
+You are impl-N on the speech-cartridge team (epic #7). Read CLAUDE.md,
+docs/plans/duplex-speech-cartridge.md and
+docs/plans/duplex-speech-cartridge-agents.md; the agents file overrides the
+plan and the issue body where they differ. Your issue is #N: read it and
+the summary comments of every issue it is blocked by.
+
+Setup: claim #N on the Cartridges board per CLAUDE.md (assign, Status In
+Progress, claim comment, re-check for a race) and claim its task in the
+team task list. Create your own worktree:
+`git worktree add ../cartridges-issue-N -b issue-N-<slug>` and work only
+there. Touch only the files your issue lists; never src/cartridges/ or
+data/; message the lead before touching anything else.
+
+Build exactly the issue's acceptance criteria using the interface
+contracts in the agents file section 5 and the backend protocol in 4b.
+Run the CPU tests and `--dry-run` before any Modal GPU run; stay under the
+$40 cap and record GPU-hours and dollars. Log runs to W&B per the agents
+file section 4.
+
+Done: acceptance list checked, tests green, PR open with "Closes #N",
+Status Review, a summary comment on #N with the numbers and what the next
+issue needs to know, then mark your task completed and message the lead
+with the PR link. If you are blocked, set Status Blocked, comment why,
+message the lead, and stop. Do not spawn subagents in the background; do
+not idle without posting the summary.
 ```
+
+### 9.5 Reviewer spawn prompt
+
+```
+You are reviewer on the speech-cartridge team (epic #7). Read CLAUDE.md
+and docs/plans/duplex-speech-cartridge-agents.md. When the lead or an
+implementer messages you a PR, review only against that issue's acceptance
+list, the section 5 interface contracts, the section 4 conventions (no
+src/cartridges/ edits, nothing from data/ committed, W&B logging names)
+and the hooks' test results. Post findings as PR review comments and
+message the implementer with the list; message the lead "approved #N" or
+"changes requested #N". Do not edit code.
+```
+
+### 9.6 Known limits to plan around
+
+- `/resume` does not restore in-process teammates; after a restart, the
+  lead re-reads the board and the task list and respawns teammates with
+  the same names and prompts.
+- Task status can lag; the board is the truth, and the lead nudges.
+- Teammates cannot spawn their own teams or background subagents; heavy
+  parallel work inside one issue is sequential or split into issues.
+- Teammate permission prompts appear in the lead's session; the
+  pre-approvals in 9.1 are what keeps the team moving.
+- Each teammate is a full context window; five teammates cost about five
+  sessions. That is the price of parallel waves, and section 3 caps it.
