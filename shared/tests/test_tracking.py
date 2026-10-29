@@ -1,6 +1,9 @@
 """shared.tracking with W&B disabled: naming, cost, artifacts."""
 
 import datetime
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -34,3 +37,12 @@ def test_start_run_cost_and_disabled_artifacts(tmp_path):
     assert tracking.log_artifact(run, tmp_path, type="voice-cartridge") is None
     assert run.use_artifact(tmp_path) == tmp_path
     run.finish()
+
+
+def test_imports_from_a_shallow_path_as_in_a_modal_container(monkeypatch):
+    """On Modal the module is /root/shared/tracking.py (3 parents, no .git); importing it must not raise."""
+    module = types.ModuleType("tracking_shallow")
+    module.__file__ = "/root/shared/tracking.py"
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(Path(tracking.__file__).read_text(), module.__file__, "exec"), module.__dict__)
+    assert isinstance(module._REPO_ROOT, Path)
