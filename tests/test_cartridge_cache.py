@@ -187,6 +187,16 @@ def test_gradient_checkpointing_gives_same_grads():
         torch.testing.assert_close(a, b)
 
 
+def test_stream_yields_generates_tokens_and_stops_at_eos():
+    model = tiny_model()
+    cart = Cartridge.from_prefill(model, ids(P))
+    y = ids(5, seed=3)
+    free = cart.generate(model, y, max_new_tokens=8)[0].tolist()
+    assert list(cart.stream(model, y, max_new_tokens=8)) == free
+    eos = free[2]
+    assert list(cart.stream(model, y, max_new_tokens=8, eos_token_id=eos)) == free[: free.index(eos) + 1]
+
+
 def _trim(row: list[int], eos: int) -> list[int]:
     return row[: row.index(eos) + 1] if eos in row else row
 

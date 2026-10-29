@@ -4,10 +4,14 @@
     POST /v1/chat/completions  stream or not; OpenAI wire format
 
 The backends (serve/backends.py) block until the answer is done; the gateway
-runs them in a thread and, for `stream: true`, chunks the finished text into
-`chat.completion.chunk` events. Transport-class failures
-(TransientBackendError) are retried twice with a short backoff; anything
-else is not retried. Errors are OpenAI-style `{error: {message, type, code}}`.
+runs them in a thread. For `stream: true`, when build_app has the streaming
+backends, each `chat.completion.chunk` carries the tokens as the model samples
+them, with a non-standard `tokens` count per chunk (for tokens/s); otherwise
+the finished text is chunked. Transport-class failures
+(TransientBackendError) of non-streamed calls are retried twice with a short
+backoff; anything else is not retried. Errors are OpenAI-style
+`{error: {message, type, code}}`; a live stream that fails sends one as an
+event, then `[DONE]`.
 
 Run with: uv run cartridges gateway_serve --port 8008
 """
@@ -108,11 +112,16 @@ def build_app(
     models: dict[str, ChatModel] = CHAT_MODELS,
     backoff_s: float = 1.0,
     call_timeout_s: float = CALL_TIMEOUT_S,
+    teacher_stream: Callable | None = None,
+    cartridge_stream: Callable | None = None,
 ):
     """The public API. `teacher_generate(model_id, with_context, messages,
     max_tokens, temperature)` and `cartridge_generate(cartridge, messages,
     max_tokens, temperature)` block and return a backends.Generation (fakes in
-    tests)."""
+    tests). A model with a `gpu` also gets `gpu=` (cartridge backend).
+    `teacher_stream` and `cartridge_stream` (same arguments) return an iterator
+    of {text, tokens} events and a final {finish_reason, prompt_tokens,
+    completion_tokens}; without them `stream: true` chunks the finished text."""
     from fastapi import Depends, FastAPI, Header, HTTPException, Request
     from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -131,7 +140,14 @@ def build_app(
     def call_backend(model: ChatModel, messages: list[dict], request: ChatRequest) -> dict:
         if model.backend == "teacher":
             return teacher_generate(model.model_id, model.with_context, messages, request.max_tokens, request.temperature)
-        return cartridge_generate(model.cartridge, messages, request.max_tokens, request.temperature)
+        return cartridge_generate(model.cartridge, messages, request.max_tokens, request.temperature,
+                                  **({"gpu": model.gpu} if model.gpu else {}))
+
+    def stream_events(model: ChatModel, messages: list[dict], request: ChatRequest):
+        if model.backend == "teacher":
+            return teacher_stream(model.model_id, model.with_context, messages, request.max_tokens, request.temperature)
+        return cartridge_stream(model.cartridge, messages, request.max_tokens, request.temperature,
+                                **({"gpu": model.gpu} if model.gpu else {}))
 
     async def generate(model: ChatModel, request: ChatRequest) -> tuple[str, str | None, Usage]:
         messages = clean_messages(request.messages)
@@ -178,6 +194,36 @@ def build_app(
         yield sse(request_id, created, model, {}, finish_reason or "stop", usage=usage.model_dump())
         yield "data: [DONE]\n\n"
 
+    async def live_stream(request_id: str, created: int, model: ChatModel, request: ChatRequest) -> AsyncIterator[str]:
+        """The backend's events as chunks, each as it arrives (the blocking
+        Modal generator runs in a thread and feeds a queue)."""
+        loop, queue, end = asyncio.get_running_loop(), asyncio.Queue(), object()
+        messages = clean_messages(request.messages)
+
+        def pump() -> None:
+            try:
+                for event in stream_events(model, messages, request):
+                    loop.call_soon_threadsafe(queue.put_nowait, event)
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, e)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, end)
+
+        worker = asyncio.create_task(asyncio.to_thread(pump))
+        yield sse(request_id, created, model.id, {"role": "assistant", "content": ""}, None)
+        while (event := await queue.get()) is not end:
+            if isinstance(event, Exception):
+                error = {"message": f"backend error: {event}", "type": "api_error", "code": 502}
+                yield f"data: {json.dumps({'error': error})}\n\n"
+            elif "text" in event:
+                yield sse(request_id, created, model.id, {"content": event["text"]}, None, tokens=event["tokens"])
+            else:
+                prompt, completion = event.get("prompt_tokens") or 0, event.get("completion_tokens") or 0
+                usage = Usage(prompt_tokens=prompt, completion_tokens=completion, total_tokens=prompt + completion)
+                yield sse(request_id, created, model.id, {}, event.get("finish_reason") or "stop", usage=usage.model_dump())
+        await worker
+        yield "data: [DONE]\n\n"
+
     @web.get("/v1/models", dependencies=[Depends(check_key)])
     async def list_models() -> dict:
         return {"object": "list", "data": [{"id": m.id, "object": "model", "owned_by": "cartridges"} for m in models.values()]}
@@ -188,6 +234,9 @@ def build_app(
         if model is None:
             raise HTTPException(status_code=404, detail=f"model not found: {request.model}")
         request_id, created = f"chatcmpl-{uuid.uuid4().hex[:24]}", int(time.time())
+        live = {"teacher": teacher_stream, "cartridge": cartridge_stream}.get(model.backend)
+        if request.stream and live is not None:
+            return StreamingResponse(live_stream(request_id, created, model, request), media_type="text/event-stream")
         text, finish_reason, usage = await generate(model, request)
         if request.stream:
             return StreamingResponse(

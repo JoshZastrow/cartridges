@@ -76,8 +76,8 @@ def teacher_handle(model_id: str):
 
 
 @functools.lru_cache(maxsize=None)
-def cartridge_handle(cartridge: str):
-    return cartridge_cls(cartridge)
+def cartridge_handle(cartridge: str, gpu: str | None = None):
+    return cartridge_cls(cartridge, **({"gpu": gpu} if gpu else {}))
 
 
 def teacher_generate(
@@ -91,7 +91,25 @@ def teacher_generate(
 
 
 def cartridge_generate(
-    cartridge: str, messages: list[dict], max_tokens: int, temperature: float | None, timeout_s: float = 1500
+    cartridge: str, messages: list[dict], max_tokens: int, temperature: float | None, timeout_s: float = 1500,
+    gpu: str | None = None,
 ) -> Generation:
-    call = cartridge_handle(cartridge).generate.spawn(messages, max_tokens=max_tokens, temperature=temperature)
+    call = cartridge_handle(cartridge, gpu).generate.spawn(messages, max_tokens=max_tokens, temperature=temperature)
     return Generation(**await_call(call, timeout_s))
+
+
+def teacher_stream(model_id: str, with_context: bool, messages: list[dict], max_tokens: int, temperature: float | None):
+    """Teacher.generate_stream's events: {text, tokens} deltas, then
+    {finish_reason, prompt_tokens, completion_tokens}. Not retried."""
+    return teacher_handle(model_id).generate_stream.remote_gen(
+        messages, max_tokens=max_tokens, with_context=with_context, temperature=temperature
+    )
+
+
+def cartridge_stream(
+    cartridge: str, messages: list[dict], max_tokens: int, temperature: float | None, gpu: str | None = None
+):
+    """CartridgeServer.generate_stream's events, in teacher_stream's format."""
+    return cartridge_handle(cartridge, gpu).generate_stream.remote_gen(
+        messages, max_tokens=max_tokens, temperature=temperature
+    )

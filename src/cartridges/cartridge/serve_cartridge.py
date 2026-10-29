@@ -59,6 +59,7 @@ class CartridgeServer:
     """Chat generation with a cartridge on the volume (a path under /vol/cartridges)."""
 
     cartridge: str = modal.parameter(default=SMOKE_CARTRIDGE)
+    gpu: str = modal.parameter(default=GPU)  # set by cartridge_cls with with_options(gpu=...), for cost logging
 
     @modal.enter()
     def start(self):
@@ -76,7 +77,7 @@ class CartridgeServer:
         group = self.cart.meta.get("group") or tracking.group_name("cartridge-serve")
         self.run = tracking.init_run(
             "eval", model_id, group, config={"cartridge": self.cartridge, **self.cart.meta},
-            p=self.cart.p, gpu=GPU, role="cartridge-serve",
+            p=self.cart.p, gpu=self.gpu, role="cartridge-serve",
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(model_id, dtype=self.cart.dtype_, device_map="cuda").eval()
@@ -112,6 +113,35 @@ class CartridgeServer:
             "completion_tokens": len(ids),
         }
 
+    @modal.method()
+    def generate_stream(self, messages: list[dict], max_tokens: int = 512, temperature: float | None = None):
+        """`generate` one token at a time (call with .remote_gen): yields
+        {text, tokens} as each token is sampled (text is the new decoded text,
+        held back while it ends inside a multi-byte character), then
+        {finish_reason, prompt_tokens, completion_tokens}."""
+        from cartridges.cartridge.teacher import SAMPLING, render
+
+        _, prompt_ids = render(self.tokenizer, messages)
+        prompt = self.torch.tensor([prompt_ids], device="cuda")
+        ids, sent, finish_reason, t0 = [], "", "length", time.perf_counter()
+        for token in self.cart.stream(
+            self.model, prompt, max_new_tokens=max_tokens, temperature=temperature or 0.0,
+            top_p=SAMPLING["top_p"] if temperature else 1.0, eos_token_id=self.eos_ids or None,
+        ):
+            if token in self.eos_ids:
+                finish_reason = "stop"
+                break
+            ids.append(token)
+            text = self.tokenizer.decode(ids, skip_special_tokens=True)
+            if not text.endswith("\ufffd"):
+                yield {"text": text[len(sent):], "tokens": 1}
+                sent = text
+            else:
+                yield {"text": "", "tokens": 1}
+        self.run.log({"gen/latency_s": time.perf_counter() - t0, "gen/prompt_tokens": len(prompt_ids),
+                      "gen/output_tokens": len(ids)})
+        yield {"finish_reason": finish_reason, "prompt_tokens": len(prompt_ids), "completion_tokens": len(ids)}
+
     @modal.exit()
     def stop(self):
         self.run.finish()
@@ -119,6 +149,9 @@ class CartridgeServer:
 
 def cartridge_cls(cartridge: str = SMOKE_CARTRIDGE, **options):
     """A handle on the deployed CartridgeServer for `cartridge` (one container
-    pool per path); `options` go to with_options (e.g. gpu for a bigger base)."""
+    pool per path and GPU); `options` go to with_options (e.g. gpu="H200" for
+    the 27B base)."""
     cls = modal.Cls.from_name(APP_NAME, "CartridgeServer")
-    return (cls.with_options(**options) if options else cls)(cartridge=cartridge)
+    if not options:
+        return cls(cartridge=cartridge)
+    return cls.with_options(**options)(cartridge=cartridge, gpu=options.get("gpu", GPU))
