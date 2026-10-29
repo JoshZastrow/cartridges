@@ -207,17 +207,11 @@ def test_prompt_names_must_be_bare(bad):
         safe_name(bad)
 
 
-def test_prompt_path_and_proxy_headers(monkeypatch):
+def test_prompt_path():
     from voice.deploy_hertz import prompt_path
-    from voice.hertz_transport import proxy_auth_headers
 
     assert prompt_path("prompt-30s.wav", False) == "/voice/prompt-30s.wav"
     assert prompt_path("mine.wav", True) == "/voice/prompts/mine.wav"
-    monkeypatch.delenv("MODAL_PROXY_TOKEN_ID", raising=False)
-    assert proxy_auth_headers() == {}
-    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-1")
-    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-2")
-    assert proxy_auth_headers() == {"Modal-Key": "wk-1", "Modal-Secret": "ws-2"}
 
 
 def test_server_takes_no_paths_from_clients(backend):

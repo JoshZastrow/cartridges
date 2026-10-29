@@ -9,12 +9,12 @@ and the server answers each 2000-sample (125 ms) user chunk with exactly one
 2000-sample agent chunk: strict request/response, no handshake. The server
 closes with 1011 "context full ..." when its caches are full (see
 `voice.backends.hertz.ContextFull`) and 1013 when another session is live.
-The deployed endpoint requires Modal proxy auth: `connect` sends Modal-Key /
-Modal-Secret from MODAL_PROXY_TOKEN_ID / MODAL_PROXY_TOKEN_SECRET when set.
+The deployed endpoint requires Modal proxy auth; the Modal-Key / Modal-Secret
+headers ride on the aiohttp session the caller passes to `connect`
+(`voice.client` scopes them to our workspace's hosts), never set here.
 """
 
 import base64
-import os
 from collections.abc import AsyncIterator
 
 import aiohttp
@@ -37,11 +37,6 @@ def unpack(frame: str) -> np.ndarray:
     return np.frombuffer(base64.b64decode(frame.split(",", 1)[1]), dtype="<i2").astype(np.float32) / 32767.0
 
 
-def proxy_auth_headers() -> dict[str, str]:
-    key, secret = os.environ.get("MODAL_PROXY_TOKEN_ID"), os.environ.get("MODAL_PROXY_TOKEN_SECRET")
-    return {"Modal-Key": key, "Modal-Secret": secret} if key and secret else {}
-
-
 class HertzTransport:
     sample_rate = SAMPLE_RATE
     frame_size = FRAME_SIZE
@@ -52,7 +47,7 @@ class HertzTransport:
         self.closed_with: tuple[int | None, str] | None = None  # e.g. (1011, "context full: ...")
 
     async def connect(self, session: aiohttp.ClientSession, url: str) -> None:
-        self.ws = await session.ws_connect(url, max_msg_size=0, headers=proxy_auth_headers())
+        self.ws = await session.ws_connect(url, max_msg_size=0)
 
     async def send(self, pcm: np.ndarray) -> int:
         """Send one chunk; returns the bytes put on the wire (always sent, never held)."""
