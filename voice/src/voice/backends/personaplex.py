@@ -290,8 +290,20 @@ class PersonaPlexBackend:
                         agent_wav=write_wav(out / f"{rid}.agent.wav", agent_pcm),
                         response_text="".join(pieces).strip())
 
+    def server_command(self, files: dict[str, str], port: int) -> list[str]:
+        """`moshi.server` with explicit weight paths, launched through the voice_prompt
+        patch so the check runs inside the server process."""
+        cmd = [sys.executable, "-m", "voice.patches.personaplex_voice_prompt", "--host", "0.0.0.0",
+               "--port", str(port), "--static", "none", "--device", self.config.device,
+               "--tokenizer", files["tokenizer"], "--moshi-weight", files["moshi"], "--mimi-weight", files["mimi"],
+               "--voice-prompt-dir", files["voices"]]
+        if not Path(self.config.checkpoint).is_dir():
+            cmd += ["--hf-repo", self.config.checkpoint]
+        return cmd
+
     def serve(self, cartridge, port: int, startup_timeout_s: float = 1200.0) -> PersonaPlexServer:
-        """Start the fork's `moshi.server` unchanged (no static UI) on `port`
+        """Start the fork's `moshi.server` (unchanged on disk, voice_prompt checked by
+        `voice.patches.personaplex_voice_prompt`; no static UI) on `port`
         and return once it listens. Weights are resolved first (HF cache) so the
         server never downloads; `timings` splits the cold start."""
         if cartridge is not None:
@@ -299,11 +311,7 @@ class PersonaPlexBackend:
         t0 = time.monotonic()
         f = self.files()
         resolved = time.monotonic() - t0
-        cmd = [sys.executable, "-m", "moshi.server", "--host", "0.0.0.0", "--port", str(port), "--static", "none",
-               "--device", self.config.device, "--tokenizer", f["tokenizer"], "--moshi-weight", f["moshi"],
-               "--mimi-weight", f["mimi"], "--voice-prompt-dir", f["voices"]]
-        if not Path(self.config.checkpoint).is_dir():
-            cmd += ["--hf-repo", self.config.checkpoint]
+        cmd = self.server_command(f, port)
         logger.info("starting %s", " ".join(cmd))
         proc = subprocess.Popen(cmd)
         wait_for_port(port, proc, startup_timeout_s)
