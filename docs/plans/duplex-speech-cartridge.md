@@ -186,7 +186,7 @@ model takes a voice anyway. The problems are what the model *is*:
    a continuous-latent regression; the loss changes accordingly (KL vs
    likelihood on latents), and our pipeline has no continuous-target path.
 3. **No evaluation path without text.** Every memory metric we have goes
-   through transcripts. We can still Whisper the output, but the model's own
+   through transcripts. We can still transcribe the output with Phonon-2, but the model's own
    knowledge is not readable the way a text stream is.
 4. **No Mac build.** Dessa's local-run promise is met today by Moshi and
    PersonaPlex through MLX, not by hertz-dev.
@@ -245,7 +245,7 @@ Three things make it harder:
   bf16 round-off).
 - **F2. Memory.** The model with the cartridge answers spoken questions about
   the journal. Metric: our existing Teacher judge (rubric `score-v0`) on
-  Whisper transcripts of the agent's audio, plus context-gap-closed on the
+  Phonon-2 transcripts of the agent's audio, plus context-gap-closed on the
   agent *text* stream against the PersonaPlex teacher.
 - **F3. Voice.** The agent speaks in your voice. Metric: speaker similarity
   (WavLM-TDNN or ECAPA cosine) between agent audio and held-out clips of you.
@@ -341,15 +341,21 @@ Three things make it harder:
   micro-batch 2; cartridge + Adam state ≈ 4.3 GB at p=2048 (268M fp32 params
   × 4 states), 2.1 GB at p=1024. Fits comfortably. Modal: `gpu="H200"`,
   `timeout=6h`, same image lineage as `train_distill.py` plus the vendored
-  `moshi` fork, `sentencepiece`, `whisper` for evals.
+  `moshi` fork, `sentencepiece`, `fermion-research` (Phonon-2) for evals.
 - **I2. Storage.** Teacher rollouts with top-20 logits: 3,000 dialogues ×
   750 frames × 9 streams × 20 × (4+4 bytes) ≈ 3.2 GB. Target store shards as
   today (`tasks/targets.py`) with a `stream` column.
 - **I3. Tracking.** W&B runs and artifacts exactly as the text pipeline;
   cartridge artifact type `duplex-cartridge`.
-- **I4. Audio tooling.** Mimi encode/decode (shipped), Whisper-large-v3 for
-  transcripts, WavLM-TDNN (or `speechbrain` ECAPA) for speaker similarity,
-  Full-Duplex-Bench scripts for turn-taking.
+- **I4. Audio tooling.** Mimi encode/decode (shipped); **Phonon-2**
+  (`FermionResearch/Phonon-2`, English ASR derived from Parakeet-TDT-0.6B-v3,
+  CC-BY-4.0, 164 MB) for every transcript and for word-level timestamps
+  (`phonon transcribe --json` gives a start and end time per word); it runs
+  on Apple Silicon via MLX for local work and in its CUDA Docker image on
+  Modal for batch evals, at thousands of times real time on an H100;
+  WavLM-TDNN (or `speechbrain` ECAPA) for speaker similarity;
+  Full-Duplex-Bench scripts for turn-taking. Phonon-2 is English-only, which
+  matches the journal.
 
 ### 3.5 Evaluation
 
@@ -357,11 +363,11 @@ Three things make it harder:
 |---|---|---|---|
 | Teacher-forced KL to PersonaPlex teacher, agent text stream | measured at init | −40% from init | held-out rollouts |
 | Context gap closed, text stream (base prompt ↔ teacher-with-brief) | 0 | ≥ 0.4 | NLL on held-out teacher rollouts |
-| Judge score (score-v0) on Whisper transcript | measured | ≥ text cartridge stage 2 (2.9 fidelity) | 40 held-out tasks, Qwen Teacher judge |
+| Judge score (score-v0) on Phonon-2 transcript | measured | ≥ text cartridge stage 2 (2.9 fidelity) | 40 held-out tasks, Qwen Teacher judge |
 | Speaker similarity to you | ≈ 0.6 (prompt) | ≥ baseline; phase 2 ≥ 0.7 | WavLM-TDNN cosine, 100 utterances |
 | Turn-taking / interruption latency | 0.17 s / 0.24 s | within 10% | Full-Duplex-Bench |
 | Spurious onset rate | 27.5% | ≤ baseline | 20 × 5-min silence runs |
-| Word error rate of agent speech vs its own text stream | measured | within 10% | Whisper |
+| Word error rate of agent speech vs its own text stream | measured | within 10% | Phonon-2 |
 
 ### 3.6 Risks and unknowns
 
@@ -411,7 +417,7 @@ src/cartridges/duplex/
   brief.py        Qwen Teacher writes evidence briefs and the journal digest (reuses cartridge/teacher.py)
   tts.py          render user-channel questions (other voices) and agent answers (your TTS); augment
   train.py        stage 1 distill (M3), stage 2 on-policy (M4); Modal app
-  evals.py        Whisper transcripts, speaker sim, turn-taking, spurious onsets, judge glue
+  evals.py        Phonon-2 transcripts, speaker sim, turn-taking, spurious onsets, judge glue
   serve.py        --cartridge flag for moshi.server / moshi.offline (M6)
 ```
 
@@ -549,6 +555,7 @@ Stage 2: 30 steps with rollouts ≈ 4 GPU-h ≈ $20. Evals ≈ $10. **Phase 1 to
 - Memory in speech models: MoshiRAG https://arxiv.org/abs/2604.12928 ·
   VoiceMem https://arxiv.org/abs/2608.26005 · "Where Should a Document Live"
   https://arxiv.org/abs/2609.17346
+- Transcription: Phonon-2 https://huggingface.co/FermionResearch/Phonon-2
 - Full-duplex model list: https://github.com/Ruiqi-Yan/Awesome-Full-Duplex-SDM
 - Dessa-profile candidates: hertz-dev https://github.com/Standard-Intelligence/hertz-dev ·
   https://huggingface.co/si-pbc/hertz-dev · dGSLM https://arxiv.org/abs/2203.16502 ·
