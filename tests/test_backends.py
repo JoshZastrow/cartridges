@@ -61,6 +61,21 @@ def test_cartridge_generate_builds_generation_from_the_dict(monkeypatch):
     assert call.timeout == 1500
 
 
+def test_cartridge_vllm_generate_passes_the_cartridge_to_the_engine(monkeypatch):
+    result = {"text": "Cat Stevens", "finish_reason": "stop", "prompt_tokens": 30, "completion_tokens": 4}
+    call, spawned, handles = FakeCall(result=result), [], []
+
+    def handle(model_id):
+        handles.append(model_id)
+        return SimpleNamespace(generate=SimpleNamespace(spawn=lambda *args, **kw: spawned.append((args, kw)) or call))
+
+    monkeypatch.setattr(backends, "engine_handle", handle)
+    out = backends.cartridge_vllm_generate("Qwen/Qwen3.5-4B", "/vol/cartridges/x", MESSAGES, 64, 0.3)
+    assert out == backends.Generation(**result)
+    assert handles == ["Qwen/Qwen3.5-4B"]
+    assert spawned == [(("/vol/cartridges/x", MESSAGES), {"max_tokens": 64, "temperature": 0.3})]
+
+
 @pytest.mark.parametrize("error", [
     modal.exception.RemoteError("container died"),
     modal.exception.FunctionTimeoutError("30 min"),

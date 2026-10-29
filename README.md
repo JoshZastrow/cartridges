@@ -248,15 +248,39 @@ It talks to the gateway, which streams tokens as the models sample them.
 
 ```bash
 uv run modal deploy -m cartridges.cartridge.teacher            # once, after changing the Modal classes
-uv run modal deploy -m cartridges.cartridge.serve_cartridge
+uv run modal deploy -m cartridges.serve.vllm_cartridge         # the cartridge on vLLM (see below)
 uv run cartridges gateway_serve --port 8008                    # terminal 1
 cd demo && npm install && npm start                            # terminal 2; --prompt "..." to start with a question
 ```
 
 Both models run on an H200 (about $4.54/h each), and each container stays up 5 minutes after its last request.
 The first request warms both containers, which can take several minutes.
-The two engines differ: the Teacher decodes with vLLM, and the cartridge decodes with plain Hugging Face, one token at a time.
-So the latency gap mixes the engine with the size of the context.
+By default both panes run the same engine: vLLM 0.29 with the Teacher's settings, one H200 each.
+`--cartridge journal-cartridge-27b-am` switches the cartridge pane to the older Hugging Face decode (`cartridges.cartridge.serve_cartridge`, one token at a time, about 4x slower).
+
+### The cartridge on vLLM
+
+`CartridgeEngine` (`src/cartridges/serve/vllm_cartridge.py`) loads the base model once and serves any exported cartridge of it.
+A KV connector (`src/cartridges/serve/vllm_connector.py`) copies the cartridge into the request's first `p` positions, so vLLM never computes them.
+A cartridge must be exported once (and again after retraining) before the engine will serve it:
+
+```bash
+uv run cartridges cartridge_export_vllm --cartridge /vol/cartridges/exp-20261027-am-stage2/onpolicy-best   # CPU, writes <dir>/vllm/
+uv run modal deploy -m cartridges.serve.vllm_cartridge
+```
+
+In the gateway, the vLLM cartridges are the model ids ending in `-vllm` (`journal-cartridge-27b-am-vllm`, `journal-cartridge-4b-smoke-vllm`).
+The engine differs from the Teacher's in two ways only: prefix caching is off, and the connector is on.
+Its greedy output matches the HF `Cartridge` to bf16 noise: on 27B, the teacher-forced top-1 agreement over 256 tokens is at least 98.0%, against a 97.8% floor for the base model alone (`uv run modal run tests/vllm_cartridge_modal.py`).
+
+| 27B, H200, batch 1 (same GPU) | TTFT | Decode tok/s |
+|---|---|---|
+| HF cartridge (`CartridgeServer` path) | 0.11 s | 14.4 |
+| vLLM cartridge | 0.05 s | 65.7 |
+| vLLM base model, no context | 0.05 s | 66.0 |
+
+At batch 8, the vLLM cartridge decodes 469 tok/s, and the base model 480.
+In the demo setup (same prompt, greedy, 256 tokens, TTFT measured at the client), the Teacher shows 0.28 s and 56.5 tok/s, and the vLLM cartridge 0.25 s and 65.6 tok/s.
 
 ## Prepare data
 

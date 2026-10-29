@@ -1,5 +1,6 @@
 """What the gateway calls to generate: the Teacher (vLLM, journal context in
-the prompt) and the CartridgeServer (HF, base model + cartridge), both deployed
+the prompt), the CartridgeServer (HF, base model + cartridge) and the
+CartridgeEngine (vLLM, base model + any exported cartridge), all deployed
 Modal classes. Each call blocks until the answer is back (the gateway runs it
 in a thread) and returns a `Generation`.
 
@@ -20,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 
 from cartridges.cartridge import teacher
 from cartridges.cartridge.serve_cartridge import cartridge_cls
+from cartridges.serve.vllm_cartridge import engine_cls
 from cartridges.serve.gateway import TransientBackendError  # the class the gateway's retry loop catches
 
 # Retryable: the modal client's transport and server-side failures, a
@@ -80,6 +82,11 @@ def cartridge_handle(cartridge: str, gpu: str | None = None):
     return cartridge_cls(cartridge, **({"gpu": gpu} if gpu else {}))
 
 
+@functools.lru_cache(maxsize=None)
+def engine_handle(model_id: str):
+    return engine_cls(model_id)
+
+
 def teacher_generate(
     model_id: str, with_context: bool, messages: list[dict], max_tokens: int, temperature: float | None,
     timeout_s: float = 1500,
@@ -98,6 +105,14 @@ def cartridge_generate(
     return Generation(**await_call(call, timeout_s))
 
 
+def cartridge_vllm_generate(
+    model_id: str, cartridge: str, messages: list[dict], max_tokens: int, temperature: float | None,
+    timeout_s: float = 1500,
+) -> Generation:
+    call = engine_handle(model_id).generate.spawn(cartridge, messages, max_tokens=max_tokens, temperature=temperature)
+    return Generation(**await_call(call, timeout_s))
+
+
 def teacher_stream(model_id: str, with_context: bool, messages: list[dict], max_tokens: int, temperature: float | None):
     """Teacher.generate_stream's events: {text, tokens} deltas, then
     {finish_reason, prompt_tokens, completion_tokens}. Not retried."""
@@ -112,4 +127,11 @@ def cartridge_stream(
     """CartridgeServer.generate_stream's events, in teacher_stream's format."""
     return cartridge_handle(cartridge, gpu).generate_stream.remote_gen(
         messages, max_tokens=max_tokens, temperature=temperature
+    )
+
+
+def cartridge_vllm_stream(model_id: str, cartridge: str, messages: list[dict], max_tokens: int, temperature: float | None):
+    """CartridgeEngine.generate_stream's events, in teacher_stream's format."""
+    return engine_handle(model_id).generate_stream.remote_gen(
+        cartridge, messages, max_tokens=max_tokens, temperature=temperature
     )

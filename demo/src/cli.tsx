@@ -3,6 +3,7 @@
 // shows time to first token, decode tokens/s and total time.
 //
 //   npm start -- [--url http://127.0.0.1:8008] [--max-tokens 512] [--prompt "..."] [--no-warmup]
+//                [--cartridge journal-cartridge-27b-am]   (the cartridge on HF decode instead of vLLM)
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, render, useApp, useInput, useStdout } from "ink";
@@ -31,6 +32,8 @@ const config = {
   warmup: !process.argv.includes("--no-warmup"),
 };
 
+const cartridgeModel = arg("cartridge", "journal-cartridge-27b-am-vllm");
+
 const PANES: Pane[] = [
   {
     model: arg("teacher", "journal-teacher-27b"),
@@ -39,9 +42,9 @@ const PANES: Pane[] = [
     color: "cyan",
   },
   {
-    model: arg("cartridge", "journal-cartridge-27b-am"),
+    model: cartridgeModel,
     name: "Cartridge",
-    detail: "Qwen3.8-27B + 2,048-position cartridge · HF decode · H200",
+    detail: `Qwen3.8-27B + 2,048-position cartridge · ${cartridgeModel.endsWith("-vllm") ? "vLLM" : "HF decode"} · H200`,
     color: "magenta",
   },
 ];

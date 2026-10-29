@@ -185,3 +185,55 @@ def test_live_stream_failure_is_an_error_event_then_done():
     events = [json.loads(line.removeprefix("data: ")) for line in lines[:-1]]
     assert events[1]["choices"][0]["delta"]["content"] == "Hel"
     assert events[-1]["error"]["code"] == 502 and "container died" in events[-1]["error"]["message"]
+
+
+def vllm_client(calls: list, fail_after: int | None = None, n: int = 5) -> TestClient:
+    """A gateway whose cartridge-vllm backend streams `n` one-token deltas and a
+    final event (or raises after `fail_after` deltas), and answers non-streamed."""
+
+    def stream(model_id, cartridge, messages, max_tokens, temperature):
+        calls.append(("stream", model_id, cartridge, max_tokens, temperature))
+        for i in range(n):
+            if i == fail_after:
+                raise RuntimeError("no vLLM export")
+            yield {"text": f"w{i} ", "tokens": 1}
+        yield {"finish_reason": "length", "prompt_tokens": 12, "completion_tokens": n}
+
+    def generate(model_id, cartridge, messages, max_tokens, temperature):
+        calls.append(("generate", model_id, cartridge, max_tokens, temperature))
+        return FakeGeneration(text="<think></think>vLLM answer", completion_tokens=2)
+
+    def unused(*args, **kwargs):
+        raise AssertionError("cartridge-vllm models must not use the other backends")
+
+    return TestClient(build_app(unused, unused, api_key="key", teacher_stream=unused, cartridge_stream=unused,
+                                cartridge_vllm_generate=generate, cartridge_vllm_stream=stream))
+
+
+def test_cartridge_vllm_streams_each_delta_then_usage_then_done():
+    calls: list = []
+    lines = stream_lines(vllm_client(calls), "journal-cartridge-4b-smoke-vllm")
+    assert lines[-1] == "data: [DONE]"
+    chunks = [json.loads(line.removeprefix("data: ")) for line in lines[:-1]]
+    content = [c for c in chunks[1:] if c["choices"][0]["delta"].get("content")]
+    assert [c["choices"][0]["delta"]["content"] for c in content] == [f"w{i} " for i in range(5)]
+    assert sum(c["tokens"] for c in content) == chunks[-1]["usage"]["completion_tokens"] == 5
+    assert chunks[-1]["choices"][0]["finish_reason"] == "length"
+    assert chunks[-1]["usage"] == {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17}
+    model = CHAT_MODELS["journal-cartridge-4b-smoke-vllm"]
+    assert calls == [("stream", "Qwen/Qwen3.5-4B", model.cartridge, 1024, None)]
+
+
+def test_cartridge_vllm_stream_failure_is_an_error_event_then_done():
+    lines = stream_lines(vllm_client([], fail_after=2), "journal-cartridge-27b-am-vllm")
+    assert lines[-1] == "data: [DONE]"
+    events = [json.loads(line.removeprefix("data: ")) for line in lines[:-1]]
+    assert [e["choices"][0]["delta"]["content"] for e in events[1:3]] == ["w0 ", "w1 "]
+    assert events[-1]["error"]["code"] == 502 and "no vLLM export" in events[-1]["error"]["message"]
+
+
+def test_cartridge_vllm_non_stream_routes_to_the_engine_of_the_base_model():
+    calls: list = []
+    response = vllm_client(calls).post("/v1/chat/completions", json=chat("journal-cartridge-27b-am-vllm"), headers=AUTH)
+    assert response.json()["choices"][0]["message"]["content"] == "vLLM answer"
+    assert calls == [("generate", "Qwen/Qwen3.8-27B", "/vol/cartridges/exp-20261027-am-stage2/onpolicy-best", 1024, None)]

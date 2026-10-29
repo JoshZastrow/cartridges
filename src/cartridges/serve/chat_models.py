@@ -15,10 +15,10 @@ SMOKE_CARTRIDGE = "/vol/cartridges/exp-20261013-smoke/grpo"
 
 class ChatModel(BaseModel, frozen=True):
     id: str
-    backend: Literal["teacher", "cartridge", "mock"]
-    model_id: str | None = None  # teacher backend
+    backend: Literal["teacher", "cartridge", "cartridge-vllm", "mock"]
+    model_id: str | None = None  # teacher backend; cartridge-vllm: the base model (CartridgeEngine pool)
     with_context: bool = False  # teacher backend: journal context block in the prompt
-    cartridge: str | None = None  # cartridge backend: volume path
+    cartridge: str | None = None  # cartridge backends: volume path
     gpu: str | None = None  # cartridge backend: CartridgeServer GPU (None: its L4 default)
 
 
@@ -31,6 +31,11 @@ CHAT_MODELS: dict[str, ChatModel] = {
         ChatModel(id="journal-cartridge-4b-smoke", backend="cartridge", cartridge=SMOKE_CARTRIDGE),
         ChatModel(id="journal-cartridge-27b-am", backend="cartridge", gpu="H200",
                   cartridge="/vol/cartridges/exp-20261027-am-stage2/onpolicy-best"),  # attention-matched init, stage 2
+        # The same cartridges on vLLM (serve/vllm_cartridge.py); export them first.
+        ChatModel(id="journal-cartridge-4b-smoke-vllm", backend="cartridge-vllm", model_id="Qwen/Qwen3.5-4B",
+                  cartridge=SMOKE_CARTRIDGE),
+        ChatModel(id="journal-cartridge-27b-am-vllm", backend="cartridge-vllm", model_id="Qwen/Qwen3.8-27B",
+                  cartridge="/vol/cartridges/exp-20261027-am-stage2/onpolicy-best"),
         ChatModel(id="mock-echo", backend="mock"),
     ]
 }
