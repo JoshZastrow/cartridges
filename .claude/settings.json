@@ -1,0 +1,61 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv *)",
+      "Bash(rtk uv *)",
+      "Bash(git worktree *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push origin issue-*)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git checkout -b issue-*)",
+      "Bash(rtk git *)",
+      "Bash(gh issue *)",
+      "Bash(gh pr *)",
+      "Bash(gh project *)",
+      "Bash(rtk gh *)",
+      "Bash(modal *)",
+      "Bash(rtk modal *)",
+      "Bash(pytest *)",
+      "Bash(phonon *)",
+      "Edit(voice/**)",
+      "Edit(shared/**)",
+      "Edit(docs/plans/**)",
+      "Read"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push origin main)",
+      "Bash(git push * main)",
+      "Edit(src/cartridges/**)",
+      "Edit(data/**)"
+    ]
+  },
+  "hooks": {
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/voice-task-completed.sh",
+            "timeout": 600,
+            "statusMessage": "Running voice and root tests"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/voice-teammate-idle.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
