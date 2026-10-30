@@ -16,12 +16,13 @@ Shapes (T = frames of one dialogue at 8 Hz):
 The model code is upstream's (github.com/Standard-Intelligence/hertz-dev at
 `UPSTREAM_COMMIT`), imported from `HERTZ_DEV_DIR`, and runs only on CUDA: its
 autocast contexts are hard-coded to "cuda". It runs on the workspace torch
-(2.14), not only on upstream's pinned 2.5.1, with three import-time patches
-applied in `load` and upstream's tree unchanged: `hertz_sdpa` (flash/efficient
-attention, #21), `hertz_md5_stamp` (hash each checkpoint once, then trust a
-stamp) and `hertz_fast_build` (no random init; checkpoint tensors assigned,
-#27). Against 2.5.1 the outputs differ at the bf16 floor
-(`voice/scripts/hertz_parity.py`). The Modal image is `voice.deploy_hertz.image`.
+(2.14), not only on upstream's pinned 2.5.1; upstream's tree is unchanged and
+`load` applies three patches from `voice.patches`. Numerics: unchanged on 2.14,
+the outputs match 2.5.1 at the bf16 floor (#21; `voice/scripts/hertz_parity.py`).
+Speed: needs `hertz_sdpa` (flash/efficient attention; 2.14's default kernel
+makes the live step ~2.5x slower). Load: `hertz_md5_stamp` (hash each
+checkpoint once, then trust a stamp) and `hertz_fast_build` (no random init;
+checkpoint tensors assigned), #27. The Modal image is `voice.deploy_hertz.image`.
 
 Serving speaks upstream `inference_server.py`'s WebSocket protocol unchanged
 (`voice.hertz_transport`), and `HertzSession` runs its live path, minus two things: the

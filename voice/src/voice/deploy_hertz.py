@@ -18,11 +18,12 @@ never name one.
 
 `image` is the workspace versions (root uv.lock: torch 2.14.1, numpy 2.3.5,
 einops 0.9.0.dev0, hf-hub 1.32.0); #18 reuses it for training. hertz-dev pins
-torch 2.5.1 and runs here on 2.14 with three patches from `voice.patches`,
-applied in `HertzBackend.load` (upstream's tree is unchanged): `hertz_sdpa`
-(flash/efficient attention; 2.14's default kernel is ~2.5x slower, #21),
-`hertz_md5_stamp` and `hertz_fast_build` (#27, below). Outputs match 2.5.1 at
-the bf16 floor (`voice/scripts/hertz_parity.py`). Upstream's code is cloned at
+torch 2.5.1 and runs here on 2.14, with upstream's tree unchanged and three
+patches from `voice.patches` applied in `HertzBackend.load`. Numerics:
+unchanged on 2.14, the outputs match 2.5.1 at the bf16 floor (#21;
+`voice/scripts/hertz_parity.py`). Speed: needs `hertz_sdpa` (flash/efficient
+attention; 2.14's default kernel is ~2.5x slower). Load: `hertz_md5_stamp` and
+`hertz_fast_build` (#27, below). Upstream's code is cloned at
 `UPSTREAM_COMMIT` into /opt/hertz-dev; its four checkpoints (20.6 GB) download
 from the HF repo si-pbc/hertz-dev into `voice-data:hf-cache` on first start
 and load from there after.
