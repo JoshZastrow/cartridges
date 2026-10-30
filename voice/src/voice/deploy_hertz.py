@@ -196,14 +196,20 @@ def profile_load(t_call: float, prompt: str) -> list[dict]:
     rows.append({"stage": "model build + load_state_dict (fast build)",
                  "s": round(build_s - rows[-1]["s"] - rows[-2]["s"], 1),
                  "missing_keys": sum(len(r["missing"]) for r in b.loads)})
-    rows.append({"stage": ".bfloat16().to(cuda)", "s": round(b.load_s - build_s, 1)})
+    rows.append({"stage": ".bfloat16().to(cuda)", "s": round(b.load_s - build_s, 1),
+                 "non_contiguous_params": sum(not p.is_contiguous() for p in b.model.parameters())})
 
     t0 = time.perf_counter()
     s = b.session()
     for _ in range(8):
         s.step(np.zeros(CHUNK, np.float32))
+    torch.cuda.synchronize()
+    warm_s, t1 = time.perf_counter() - t0, time.perf_counter()
+    for _ in range(100):
+        s.step(np.zeros(CHUNK, np.float32))  # returns audio on the CPU, so each step is synced
     s.close()
-    rows.append({"stage": "warm-up (prompt prefill + 8 live steps)", "s": round(time.perf_counter() - t0, 1)})
+    rows.append({"stage": "warm-up (prompt prefill + 8 live steps)", "s": round(warm_s, 1),
+                 "live_step_ms": round(10 * (time.perf_counter() - t1), 1)})
     t0 = time.perf_counter()
     server = b.serve(None, 8998)
     rows.append({"stage": "server listening", "s": round(time.perf_counter() - t0, 1)})
