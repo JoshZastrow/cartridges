@@ -18,11 +18,14 @@ src/voice/
   backends/registry.py  register(name), get(name, config), BackendConfig (discriminated on name)
   backends/fake.py      FakeBackend: two tiny discrete streams, CPU test double
   backends/personaplex.py  PersonaPlex inference half (#20); cartridge half is #8
-  patches/              fork patches applied at import (personaplex_voice_prompt: voice_prompt check)
+  patches/              upstream patches applied at import (personaplex_voice_prompt: voice_prompt check;
+                        hertz_sdpa, hertz_md5_stamp, hertz_fast_build: see "Cold starts")
   train.py              generic trainer; Modal app "voice-train" (gpu="H200")
   deploy.py             Modal app "voice-serve": a backend's live server behind a WebSocket URL
   client.py             offline client: user wav in real time -> agent wav + timestamps (Conversation)
   cli.py                `voice encode|train|eval|report|deploy|serve-local --backend ...`
+scripts/
+  hertz_parity.py       hertz load path vs the saved torch 2.5.1 reference (one H200 container)
 ```
 
 Shared components (Teacher client, W&B tracking, judge, target shards,
@@ -54,6 +57,38 @@ export MODAL_PROXY_TOKEN_SECRET=ws-...
 our workspace's hosts, `<MODAL_WORKSPACE>--*.modal.run` (`MODAL_WORKSPACE`
 defaults to `joshzastrow`), and refuses to connect to them when either is
 unset. Any other host gets no token.
+
+## Cold starts
+
+A cold start loads the weights from the HF cache on the `voice-data` Volume
+(v1; cold reads 1.2-1.7 GB/s on H200). Measured on #27:
+
+| backend | container start to listening | client's first handshake (cold, through the proxy) |
+|---|---|---|
+| hertz, before #27 | ~352 s | 412 s |
+| hertz, after | 31-39 s (91 s on the first start after a checkpoint changes) | 28 s |
+| personaplex (load path unchanged) | not timed separately (cold reads 1.6 GB/s; server ready 19 s warm) | 37 s (#20), 35 s (#27) |
+
+hertz-dev's load runs three patches in `HertzBackend.load()`:
+
+- `hertz_md5_stamp`: upstream MD5s every checkpoint on every start. The
+  patch hashes each file once and writes `<file>.md5stamp` (path, size,
+  mtime_ns, md5) next to it. Later starts trust the stamp while size and
+  mtime_ns match; any change re-hashes, and a mismatch deletes the file and
+  downloads it once more, then fails. The stamp is an integrity check against
+  truncated or corrupted downloads, not a security control. It does not catch
+  bit-rot that leaves size and mtime unchanged. `deploy_hertz.loaded_backend`
+  commits the Volume so stamps persist.
+- `hertz_fast_build`: upstream random-initialises the fp32 model on the CPU
+  (293 s) before loading the checkpoints over it. The patch builds with
+  parameters on meta and assigns the checkpoint tensors; a weight that no
+  checkpoint holds raises `MissingWeights` instead of keeping a random init.
+- `hertz_sdpa`: flash/efficient attention on torch 2.14 (#21).
+
+After changing the hertz load path, re-run
+`uv run --package voice python voice/scripts/hertz_parity.py` (exits 1 on a
+parity failure) and `uv run python -m voice.deploy_hertz --profile` (one cold
+start, timed per stage; `--group exp-...` logs it to W&B).
 
 A backend is a new module under `backends/` with `@register("name")`, a config
 class in `registry.py`, and an import in `backends/__init__.py`.
