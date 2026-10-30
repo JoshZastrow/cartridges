@@ -461,6 +461,7 @@ class EvalConfig(BaseModel):
     drift_every_s: float = 26.0
     drift_window_s: float = 60.0
     judge_model: str = JUDGE_MODEL
+    utmos: bool = False  # UTMOS22 runs only when asked (its route is pending; the row is n = 0 otherwise)
     side_by_side: list[str] = []  # prompt ids (chosen by the coordinator); default: the smoke story/change ids
     dry_run: bool = False
 
@@ -536,7 +537,7 @@ class Deps:
     converse: Callable[[Job, Path], object]  # -> voice.client.Conversation
     transcribe: Callable[[str], dict]  # wav path -> {text, words}
     embed: Callable[[list[np.ndarray], int], np.ndarray]  # wavs at a rate -> [N, D] unit vectors
-    utmos: Callable[[list[np.ndarray], int], list[float]]
+    utmos: Callable[[list[np.ndarray], int], list[float | None]]
     word_conf: Callable[[list[np.ndarray], int], list[float | None]]  # mean per-word confidence per wav
     generate: Callable  # the judge: (batch, **kw) -> [Completion | None]
     phonon_version: str = "unknown"
@@ -1024,7 +1025,8 @@ def real_deps(cfg: EvalConfig) -> Deps:
         return Client(cfg.url, backend=cfg.backend, out_dir=audio).converse(job.wav, max_s=job.max_s, id=job.id)
 
     return Deps(converse=converse, transcribe=lambda wav: transcribe(wav),
-                embed=lambda wavs, sr: speaker_embedding(wavs, sr), utmos=utmos, word_conf=nemo_word_conf,
+                embed=lambda wavs, sr: speaker_embedding(wavs, sr),
+                utmos=utmos if cfg.utmos else (lambda wavs, sr: [None] * len(wavs)), word_conf=nemo_word_conf,
                 generate=T.modal_generate(handle), phonon_version=f"fermion-research {_version('fermion-research')}")
 
 

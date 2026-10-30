@@ -55,6 +55,7 @@ def parser() -> argparse.ArgumentParser:
             s.add_argument("--out", type=Path, default=None, help="default voice/outputs/eval/<group>/<backend>-<system>-<size>")
             s.add_argument("--concurrency", type=int, default=1, help="conversations at once (voice-serve containers)")
             s.add_argument("--side-by-side", nargs="*", default=[], help="prompt ids for the side-by-sides")
+            s.add_argument("--utmos", action="store_true", help="also score UTMOS22")
             for knob in ("timed_n", "fdb_per_task", "onset_runs", "drift_runs"):
                 s.add_argument("--" + knob.replace("_", "-"), type=int, default=None)
             s.add_argument("--dry-run", action="store_true", help="synthetic eval set, fake endpoint and models, W&B off")
@@ -108,7 +109,7 @@ def eval_command(args) -> int:
 
         cfg = evals.EvalConfig(url=args.url, backend=args.backend, evalset=args.evalset, size=args.size,
                                group=args.group, system=args.system, out=out, concurrency=args.concurrency,
-                               side_by_side=args.side_by_side, **knobs)
+                               side_by_side=args.side_by_side, utmos=args.utmos, **knobs)
         es = evals.fetch_evalset(args.evalset, Path("voice/outputs/evalsets"))
         try:
             report = evals.evaluate(cfg, es, evals.real_deps(cfg))
