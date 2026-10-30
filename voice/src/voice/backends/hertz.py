@@ -15,9 +15,14 @@ Shapes (T = frames of one dialogue at 8 Hz):
 
 The model code is upstream's (github.com/Standard-Intelligence/hertz-dev at
 `UPSTREAM_COMMIT`), imported from `HERTZ_DEV_DIR`, and runs only on CUDA: its
-autocast contexts are hard-coded to "cuda". It runs unpatched on the workspace
-torch (2.14), not only on upstream's pinned 2.5.1; the difference was measured
-at the bf16 floor (#21). The Modal image is `voice.deploy_hertz.image`.
+autocast contexts are hard-coded to "cuda". It runs on the workspace torch
+(2.14), not only on upstream's pinned 2.5.1; upstream's tree is unchanged and
+`load` applies three patches from `voice.patches`. Numerics: unchanged on 2.14,
+the outputs match 2.5.1 at the bf16 floor (#21; `voice/scripts/hertz_parity.py`).
+Speed: needs `hertz_sdpa` (flash/efficient attention; 2.14's default kernel
+makes the live step ~2.5x slower). Load: `hertz_md5_stamp` (hash each
+checkpoint once, then trust a stamp) and `hertz_fast_build` (no random init;
+checkpoint tensors assigned), #27. The Modal image is `voice.deploy_hertz.image`.
 
 Serving speaks upstream `inference_server.py`'s WebSocket protocol unchanged
 (`voice.hertz_transport`), and `HertzSession` runs its live path, minus two things: the
@@ -113,7 +118,10 @@ class HertzBackend:
 
     def load(self, device: str | None = None) -> None:
         """Build upstream's split (duplex) model in bf16; downloads the four
-        checkpoints into the HF cache on first use."""
+        checkpoints into the HF cache on first use. MD5s each checkpoint once
+        and leaves a stamp next to it (the caller commits the Volume); raises
+        `MissingWeights` if a checkpoint lacks a weight. `self.loads` records each
+        upstream `load_state_dict`'s missing and unexpected keys."""
         device = device or self.config.device
         if not (device.startswith("cuda") and torch.cuda.is_available()):
             raise RuntimeError(f"hertz-dev runs on CUDA only (upstream autocast is hard-coded to cuda); got {device!r}")
@@ -122,10 +130,12 @@ class HertzBackend:
         sys.path.insert(0, os.environ.get("HERTZ_DEV_DIR", "/opt/hertz-dev"))
         from model import get_hertz_dev_config
 
-        from voice.patches import hertz_sdpa
+        from voice.patches import hertz_fast_build, hertz_md5_stamp, hertz_sdpa
 
         hertz_sdpa.apply()  # flash/efficient attention: torch 2.14's default backend is ~2.5x slower here
-        self.model = get_hertz_dev_config(is_split=True)().eval().bfloat16().to(device)
+        hertz_md5_stamp.apply()  # upstream MD5s ~20 GB on every start; a stamp skips it after the first
+        model, self.loads = hertz_fast_build.build(get_hertz_dev_config(is_split=True))  # upstream's CPU init took 293 s
+        self.model = model.eval().bfloat16().to(device)
         self.device = device
 
     def set_prompt(self, wav: str | Path | np.ndarray) -> None:

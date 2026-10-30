@@ -653,8 +653,10 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   (62.5 ms live step). Context: an assert past 2048 frames, or a shape error
   at 1024 with the upstream server's default cache. The 30 s prompt uses 238
   frames, which leaves about 226 s of live audio before the server closes
-  with "context full". Cold start is about 352 s, mostly the CPU fp32 build;
-  #27 fixes it.
+  with "context full". Cold start was about 352 s, mostly the CPU fp32 build
+  (293 s) and the MD5 (38 s); #27 brings it to about 31 s from container
+  start to listening (91 s on a first start after a checkpoint changes; the
+  client's cold handshake went from 412 s to 28 s).
 - **#22.** The eval set is the first artifact and is versioned from day
   one; a change to any prompt, track or split is a new version, and runs
   record which version they used. Passages and topic exclusion live here
@@ -783,8 +785,12 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   generic module names (`model`, `transformer`) on sys.path, so import them
   only after the hertz path is set and watch for shadowing. Re-check the
   codec round trip in bf16 on the GPU (#21 checked it in fp32 on the CPU:
-  identical transcripts on 10 of 10). Reuse `voice/scripts/hertz_parity.py`
-  from #27.
+  identical transcripts on 10 of 10). Load through `HertzBackend.load()`
+  (#27): it MD5s each checkpoint once and trusts the `.md5stamp` next to it
+  after that, and builds with parameters on meta plus the checkpoint tensors
+  assigned (no random init; a missing weight raises). Any change to the load
+  path re-runs `voice/scripts/hertz_parity.py` (from #27) against
+  `voice-data:/hertz-parity/2.5.1.pt`.
 
 ## 7. Protocol, in order
 
