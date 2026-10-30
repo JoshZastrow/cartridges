@@ -56,12 +56,25 @@ sentences from one journal entry, with its date and page. Passages are the
 only source of response content. The Qwen Teacher (full journal) selects
 them; it does not paraphrase them.
 
-**Topic exclusion, first.** Before any question is written, the Qwen Teacher
-labels every passage with one of `{sexuality, anger, other}` (plus a
-`borderline` flag). `sexuality`, `anger` and `borderline` passages are
-removed from the pool and from the digest. A second classifier pass runs on
-every generated response and every teacher rollout transcript; any hit is
-dropped and counted. The counts go in the #10 summary comment. The held-out
+**Topic filtering: what is spoken, not what is read** (author's decision,
+2026-10-30). The Qwen Teacher labels every passage with one of `{sexuality,
+anger, other}` (plus a `borderline` flag). The rule is applied to the
+conversation, not to the journal:
+
+- *Allowed as context:* any passage, whatever its label, may sit in the Qwen
+  Teacher's context, be selected as the source of a question and response,
+  and be in the PersonaPlex passage-prompted teacher's `<system>` prompt
+  (#13).
+- *Filtered:* every generated question and response, and every teacher
+  rollout transcript, runs through the topic classifier; any hit is
+  regenerated once, then the item is skipped. Nothing about sexuality or
+  anger is ever spoken in a training or eval dialogue.
+- *Clean only:* the journal digest in the cartridge init uses only `other`,
+  non-borderline passages (after the author's overrides in
+  `data/voice/passage_overrides.csv`), because it is baked into the
+  deployed cartridge.
+
+Passage labels are kept for the digest and for reporting. The counts go in the #10 summary comment. The held-out
 eval includes 20 prompts that invite those topics, to measure the
 in-character decline (target: 0 violations).
 
@@ -532,8 +545,10 @@ Phonon-2 word timestamps (`phonon transcribe --json`). `frames/` is per backend
 produced by `backend.encode_dialogue`; the PersonaPlex layout above places
 each word's SentencePiece tokens at its start frame with the pad id between
 words and Mimi tokens of both wavs; the hertz layout holds `user`/`agent`
-FSQ tokens `[T]` and `mu` latents `[T, 32]` at 8 Hz. Only `topic == other`
-and `borderline == false` passages appear in any dialogue.
+FSQ tokens `[T]` and `mu` latents `[T, 32]` at 8 Hz. Any passage may be a
+dialogue's source; every `question` and `response_text` has passed the topic
+classifier (section 1b). `passages.jsonl` also carries `override`
+(include | exclude | null) from the author's review; it affects the digest only.
 
 **Teacher targets (from #13, the distillation regulariser)**
 ```
@@ -669,14 +684,15 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
 - **#10.** Training data only; voice splits, passages and topic exclusion
   come from #22. Order of work: (1) Pocket TTS cloning from the prompt
   split (fine-tune on the training split if #22's ceiling is < 0.7);
-  (2) train passages = the `other` pool minus #22's held-out passages;
+  (2) train passages = all passages minus #22's held-out passages (any
+  topic label; the topic filter runs on the generated question and response);
   (3) questions and responses per section 1b, with the
   mechanical validators (coverage ≥ 0.8, first person, no citations in
   spoken text, length, topic) in `data.py` with unit tests; (4) render
   responses with the author's TTS, questions with other voices, align with
   Phonon-2 word timestamps, Mimi-encode, write `dialogue.jsonl` and frames.
-  The journal digest for the cartridge init is built from `other` passages
-  only. Use `shared.teacher` for the Qwen Teacher; copy the validators'
+  The journal digest for the cartridge init is built from `other`,
+  non-borderline passages only, after the author's overrides. Use `shared.teacher` for the Qwen Teacher; copy the validators'
   style (not the code) from `cartridges/cartridge/tasks/label.py`.
 - **#11.** Still a measurement, now of how long a passage prompt each
   backend can take before its agent stream or duplex behaviour degrades.
