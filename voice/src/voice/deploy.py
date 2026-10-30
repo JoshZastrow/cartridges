@@ -10,6 +10,12 @@ names to them. #20 ships personaplex with the stock system; #21 adds hertz
 (image, start-up and prompt in `voice.deploy_hertz`);
 #12 adds `--system <cartridge artifact>`.
 
+The author's 30 s clip (#22, `voice-voice:/prompt-30s.wav`) is copied into
+PersonaPlex's voices directory at start-up, so a client selects it per
+connection with `voice_prompt=prompt-30s.wav` (`AUTHOR_VOICE`); the stock
+baselines of #9 use it. `VOICE_SERVE_MAX_CONTAINERS` (read at deploy time,
+default 1) lets an eval run that many sessions at once, one per container.
+
 Cold start is the cost driver (a ~16 GB checkpoint onto the GPU), so weights
 live in the HF cache on the `voice-data` Volume (`HF_HOME=/data/hf`), the app
 scales to zero after `SCALEDOWN_S` idle, and at most one container runs. The
@@ -25,6 +31,8 @@ the token from MODAL_PROXY_TOKEN_ID / MODAL_PROXY_TOKEN_SECRET (voice/README.md)
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 from urllib.parse import urlsplit, urlunsplit
 
@@ -41,6 +49,8 @@ HF_HOME = f"{DATA_MOUNT}/hf"
 SCALEDOWN_S = 300
 CHECKPOINTS = {"personaplex": "nvidia/personaplex-7b-v1", "hertz": "si-pbc/hertz-dev"}
 FUNCTIONS = {"personaplex": "personaplex", "hertz": "hertz"}  # backend -> web function in this app
+AUTHOR_VOICE = deploy_hertz.DEFAULT_PROMPT  # the author's 30 s clip on voice-voice, as a PersonaPlex voice_prompt
+MAX_CONTAINERS = int(os.environ.get("VOICE_SERVE_MAX_CONTAINERS", "1"))
 
 app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name("voice-data", create_if_missing=True)
@@ -61,17 +71,26 @@ def start(name: str, port: int = PORT):
     return server
 
 
-@app.function(image=image, gpu="H200", volumes={DATA_MOUNT: data_volume}, secrets=[modal.Secret.from_name("HF_TOKEN")],
-              env={"HF_HOME": HF_HOME}, timeout=3600, scaledown_window=SCALEDOWN_S, max_containers=1)
+def add_author_voice(voices_dir: str, src: str = deploy_hertz.prompt_path(AUTHOR_VOICE)) -> str:
+    """Copy the author's clip into PersonaPlex's voices directory (idempotent)."""
+    dst = os.path.join(voices_dir, AUTHOR_VOICE)
+    shutil.copyfile(src, dst)
+    return dst
+
+
+@app.function(image=image, gpu="H200", volumes={DATA_MOUNT: data_volume, deploy_hertz.VOICE: deploy_hertz.voice_volume},
+              secrets=[modal.Secret.from_name("HF_TOKEN")], env={"HF_HOME": HF_HOME}, timeout=3600,
+              scaledown_window=SCALEDOWN_S, max_containers=MAX_CONTAINERS)
 @modal.web_server(PORT, startup_timeout=1200, requires_proxy_auth=True)
 def personaplex():
     logging.basicConfig(level=logging.INFO)
+    add_author_voice(backend_for("personaplex").files()["voices"])
     start("personaplex")
 
 
 @app.function(image=deploy_hertz.image, gpu="H200", volumes=deploy_hertz.volumes,
               secrets=[modal.Secret.from_name("HF_TOKEN")], timeout=3600, scaledown_window=SCALEDOWN_S,
-              max_containers=1)
+              max_containers=MAX_CONTAINERS)
 @modal.web_server(PORT, startup_timeout=1200, requires_proxy_auth=True)
 def hertz():
     logging.basicConfig(level=logging.INFO)
