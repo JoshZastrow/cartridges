@@ -1011,15 +1011,19 @@ def _nemo_app():
 
         import soundfile as sf
         from nemo.collections.asr.models import ASRModel
-        from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
         from nemo.collections.asr.parts.utils.asr_confidence_utils import ConfidenceConfig, ConfidenceMethodConfig
+        from omegaconf import OmegaConf, open_dict
 
         model = ASRModel.from_pretrained(NEMO_MODEL, map_location="cpu").eval()
         conf = ConfidenceConfig(preserve_word_confidence=True, preserve_token_confidence=True, aggregation="min",
                                 exclude_blank=True, method_cfg=ConfidenceMethodConfig(
                                     name="entropy", entropy_type="tsallis", alpha=0.5, entropy_norm="exp"))
-        model.change_decoding_strategy(RNNTDecodingConfig(fused_batch_size=-1, strategy="greedy_batch",
-                                                          confidence_cfg=conf))
+        decoding = model.cfg.decoding  # the model's own TDT decoding (durations kept), plus confidence
+        with open_dict(decoding):
+            decoding.strategy = "greedy_batch"
+            decoding.preserve_alignments = True
+            decoding.confidence_cfg = OmegaConf.structured(conf)
+        model.change_decoding_strategy(decoding)
         paths = []
         with tempfile.TemporaryDirectory() as d:
             for i, b in enumerate(wavs):
