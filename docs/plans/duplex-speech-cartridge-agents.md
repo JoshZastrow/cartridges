@@ -529,7 +529,8 @@ bf16) on 10 dialogues.
 
 **Passages and dialogues (from #10)**
 ```
-passages.jsonl: {passage_id, entry_date (YYYY-MM-DD), pages [int], text, topic (sexuality|anger|other), borderline (bool)}
+passages.jsonl: {passage_id, entry_date (YYYY-MM-DD), pages [int], text, topic (sexuality|anger|other), borderline (bool),
+                 override (include|exclude|null)}   # clean = override=="include" or (override!="exclude" and topic==other and not borderline)
 dialogue.jsonl: {id, family (story|change|idea|author), split, question, response_text,
                  passage_ids [str], coverage (float), user_wav, agent_wav, words [{w, start_s, end_s}]}
 frames/<backend>/<id>.safetensors: Frames.save layout, keys tokens.<stream> [T] and latents.<stream> [T, D],
