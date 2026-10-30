@@ -6,7 +6,8 @@
 A backend plugs in through `serve(cartridge, port)` (brief 4b) and
 `client_path` (the path and query a client connects to). Each backend has one
 web function here, because each needs its own image; `FUNCTIONS` maps backend
-names to them. #20 ships personaplex with the stock system; #21 adds hertz;
+names to them. #20 ships personaplex with the stock system; #21 adds hertz
+(image, start-up and prompt in `voice.deploy_hertz`);
 #12 adds `--system <cartridge artifact>`.
 
 Cold start is the cost driver (a ~16 GB checkpoint onto the GPU), so weights
@@ -29,7 +30,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import modal
 
-from voice import backends
+from voice import backends, deploy_hertz
 from voice.train import DATA_MOUNT, image
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,8 @@ APP_NAME = "voice-serve"
 PORT = 8998
 HF_HOME = f"{DATA_MOUNT}/hf"
 SCALEDOWN_S = 300
-CHECKPOINTS = {"personaplex": "nvidia/personaplex-7b-v1"}
-FUNCTIONS = {"personaplex": "personaplex"}  # backend -> web function in this app
+CHECKPOINTS = {"personaplex": "nvidia/personaplex-7b-v1", "hertz": "si-pbc/hertz-dev"}
+FUNCTIONS = {"personaplex": "personaplex", "hertz": "hertz"}  # backend -> web function in this app
 
 app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name("voice-data", create_if_missing=True)
@@ -66,6 +67,15 @@ def start(name: str, port: int = PORT):
 def personaplex():
     logging.basicConfig(level=logging.INFO)
     start("personaplex")
+
+
+@app.function(image=deploy_hertz.image, gpu="H200", volumes=deploy_hertz.volumes,
+              secrets=[modal.Secret.from_name("HF_TOKEN")], timeout=3600, scaledown_window=SCALEDOWN_S,
+              max_containers=1)
+@modal.web_server(PORT, startup_timeout=1200, requires_proxy_auth=True)
+def hertz():
+    logging.basicConfig(level=logging.INFO)
+    deploy_hertz.start(PORT)  # its own image (no moshi fork) and prompt; see voice.deploy_hertz
 
 
 def ws_url(web_url: str, client_path: str) -> str:

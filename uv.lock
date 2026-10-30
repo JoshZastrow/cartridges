@@ -5447,6 +5447,15 @@ dependencies = [
     { name = "wandb" },
 ]
 
+[package.optional-dependencies]
+hertz = [
+    { name = "aiohttp" },
+    { name = "fastapi" },
+    { name = "scipy" },
+    { name = "uvicorn" },
+    { name = "websockets" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -5454,6 +5463,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", marker = "extra == 'hertz'", specifier = ">=3.10.5" },
+    { name = "fastapi", marker = "extra == 'hertz'", specifier = ">=0.115" },
     { name = "fermion-research", specifier = ">=0.2.15" },
     { name = "modal", specifier = ">=1.5.6.dev19" },
     { name = "moshi-personaplex", git = "https://github.com/NVIDIA/personaplex?subdirectory=moshi&rev=3428dfd95309a7f3c84fd93259ded0f810d1ff91" },
@@ -5461,10 +5472,13 @@ requires-dist = [
     { name = "pocket-tts", specifier = ">=4.0.1" },
     { name = "pydantic", specifier = ">=2.14.0b2" },
     { name = "safetensors", specifier = ">=0.4" },
+    { name = "scipy", marker = "extra == 'hertz'", specifier = ">=1.13" },
     { name = "shared", editable = "shared" },
     { name = "soundfile", specifier = ">=0.13" },
     { name = "torch", specifier = ">=2.14.1" },
+    { name = "uvicorn", marker = "extra == 'hertz'", specifier = ">=0.32" },
     { name = "wandb", specifier = ">=0.30.0" },
+    { name = "websockets", marker = "extra == 'hertz'", specifier = ">=13" },
 ]
 provides-extras = ["hertz"]
 
