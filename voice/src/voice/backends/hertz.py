@@ -122,6 +122,9 @@ class HertzBackend:
         sys.path.insert(0, os.environ.get("HERTZ_DEV_DIR", "/opt/hertz-dev"))
         from model import get_hertz_dev_config
 
+        from voice.patches import hertz_sdpa
+
+        hertz_sdpa.apply()  # flash/efficient attention: torch 2.14's default backend is ~2.5x slower here
         self.model = get_hertz_dev_config(is_split=True)().eval().bfloat16().to(device)
         self.device = device
 

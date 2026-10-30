@@ -267,3 +267,30 @@ def test_transport_sends_no_auth_headers_of_its_own(monkeypatch):
 
     asyncio.run(run())
     assert seen and not any(k.lower().startswith("modal-") for k in seen)
+
+
+def test_sdpa_patch_wraps_upstream_once(tmp_path, monkeypatch):
+    """With a stand-in for upstream's `transformer` module: `_sdpa` runs inside
+    sdpa_kernel(flash, efficient), the result is unchanged, and applying twice is a no-op."""
+    import sys
+    import types
+
+    import torch.nn.functional as F
+    from torch.nn.attention import _cur_sdpa_kernel_backends
+
+    from voice.patches import hertz_sdpa
+
+    seen = []
+
+    class GQA:
+        def _sdpa(self, q, k, v):
+            seen.append(sorted(b.name for b in _cur_sdpa_kernel_backends()))
+            return F.scaled_dot_product_attention(q, k, v)
+
+    monkeypatch.setitem(sys.modules, "transformer", types.SimpleNamespace(GQA=GQA))
+    q = torch.randn(1, 2, 4, 8)
+    expected = F.scaled_dot_product_attention(q, q, q)
+    hertz_sdpa.apply()
+    hertz_sdpa.apply()
+    assert torch.allclose(GQA()._sdpa(q, q, q), expected)
+    assert seen == [["EFFICIENT_ATTENTION", "FLASH_ATTENTION"]]

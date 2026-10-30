@@ -111,7 +111,8 @@ def probe_context(prompt: str, cache_lens: list[int]) -> list[dict]:
     m, rows = b.model, []
     silence = torch.zeros(1, 1, CHUNK, device="cuda")
     for length in cache_lens:
-        frames, error = b.prompt.shape[1] // CHUNK, None
+        prompt_frames = b.prompt.shape[1] // CHUNK
+        frames, error = prompt_frames, None
         with b._ctx():
             m.init_cache(bsize=1, device="cuda", dtype=torch.bfloat16, length=length)
             nxt = m.next_audio_from_audio(b._tensor(b.prompt)[None], temps=TEMPS)
@@ -122,9 +123,9 @@ def probe_context(prompt: str, cache_lens: list[int]) -> list[dict]:
                     frames += 1
             except Exception as e:  # what the stock model does past its cache
                 error = f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"
-            step_ms = 1000 * (time.perf_counter() - t0) / max(frames, 1)
+            step_ms = 1000 * (time.perf_counter() - t0) / max(frames - prompt_frames, 1)  # live steps only
             m.deinit_cache()
-        rows.append({"torch": str(torch.__version__), "cache_len": length, "prompt_frames": b.prompt.shape[1] // CHUNK,
+        rows.append({"torch": str(torch.__version__), "cache_len": length, "prompt_frames": prompt_frames,
                      "frames_at_failure": frames, "error": error, "ms_per_step": round(step_ms, 1),
                      "load_s": round(b.load_s, 1), "max_vram_gib": round(torch.cuda.max_memory_allocated() / 2**30, 2)})
         print(rows[-1], flush=True)
