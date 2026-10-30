@@ -462,12 +462,14 @@ class EvalConfig(BaseModel):
     drift_window_s: float = 60.0
     judge_model: str = JUDGE_MODEL
     utmos: bool = False  # UTMOS22 runs only when asked (its route is pending; the row is n = 0 otherwise)
+    check: bool = False  # a deployment check: stage serve-smoke, tag check, never a baseline or candidate
+    limit: dict[str, int] = {}  # at most this many jobs per kind, or per "fdb/<version>" (profiling runs)
     side_by_side: list[str] = []  # prompt ids (chosen by the coordinator); default: the smoke story/change ids
     dry_run: bool = False
 
     @property
     def run_name(self) -> str:
-        return f"{self.backend}/{self.system}/eval-{self.size}"
+        return f"{self.backend}/{self.system}/{'serve-smoke' if self.check else 'eval-' + self.size}"
 
 
 def plan(es: EvalSet, cfg: EvalConfig, inputs: Path) -> list[Job]:
@@ -485,7 +487,7 @@ def plan(es: EvalSet, cfg: EvalConfig, inputs: Path) -> list[Job]:
         jobs.append(Job(id=pid, kind=kind, wav=str(es.root / ("baited" if kind == "baited" else "prompts") / r["user_wav"]),
                         max_s=round(user_end(r) + cfg.tail_s, 2)))
     if not full:
-        return jobs
+        return limit(jobs, cfg.limit)
     for tid in sorted(rng.sample(sorted(es.tracks), min(cfg.timed_n, len(es.tracks)))):
         t = es.tracks[tid]
         jobs.append(Job(id=tid, kind="timed", wav=str(es.root / "timed" / t["wav"]), max_s=t["duration_s"]))
@@ -509,7 +511,19 @@ def plan(es: EvalSet, cfg: EvalConfig, inputs: Path) -> list[Job]:
         path = inputs / f"drift-{k:02d}.wav"
         sf.write(path, wav, 24000)
         jobs.append(Job(id=f"drift-{k:02d}", kind="drift", wav=str(path), max_s=cfg.drift_s, meta={"prompts": chosen}))
-    return jobs
+    return limit(jobs, cfg.limit)
+
+
+def limit(jobs: list[Job], caps: dict[str, int]) -> list[Job]:
+    """The first caps[key] jobs per key (kind, or "fdb/<version>" for FDB); uncapped keys pass."""
+    seen: Counter = Counter()
+    out = []
+    for j in jobs:
+        key = f"fdb/{j.meta['version']}" if j.kind == "fdb" else j.kind
+        seen[key] += 1
+        if key not in caps or seen[key] <= caps[key]:
+            out.append(j)
+    return out
 
 
 def drift_track(wavs: list[Path], total_s: float, every_s: float, sample_rate: int = 24000) -> np.ndarray:
@@ -558,8 +572,13 @@ def converse_all(jobs: list[Job], deps: Deps, out: Path, concurrency: int = 1) -
         except Exception as e:  # a dropped connection or a busy container: one retry, then the run stops (resumable)
             logger.warning("%s failed (%s: %s); retrying once", job.id, type(e).__name__, e)
             c = deps.converse(job, out / "audio")
+        t1 = time.monotonic()
         tr = deps.transcribe(c.agent_wav)
-        return {"id": job.id, "kind": job.kind, "meta": job.meta, "max_s": job.max_s, "agent_wav": c.agent_wav,
+        talk = t1 - t0
+        spans = {"converse_s": talk, "handshake_s": c.handshake_s, "stream_s": c.user_s,
+                 "tail_s": max(0.0, job.max_s - c.user_s), "close_s": talk - c.handshake_s - job.max_s,
+                 "transcribe_s": time.monotonic() - t1}
+        return {"spans": spans, "id": job.id, "kind": job.kind, "meta": job.meta, "max_s": job.max_s, "agent_wav": c.agent_wav,
                 "user_wav": c.user_wav, "sample_rate": c.sample_rate, "handshake_s": c.handshake_s,
                 "transport_s": c.transport_s, "transport": c.transport, "text_stream": c.response_text,
                 "transcript": tr["text"], "words": tr["words"], "wall_s": time.monotonic() - t0}
@@ -584,8 +603,23 @@ def read_wav(path: str) -> tuple[np.ndarray, int]:
 # ---------------------------------------------------------------- scoring
 
 
-def score(es: EvalSet, recs: list[dict], deps: Deps, cfg: EvalConfig) -> tuple[dict, list[dict]]:
-    """report rows and per-item records (each rec gains a `scores` dict)."""
+def score(es: EvalSet, recs: list[dict], deps: Deps, cfg: EvalConfig,
+          prof: list[dict] | None = None) -> tuple[dict, list[dict]]:
+    """report rows and per-item records (each rec gains a `scores` dict). `prof` collects
+    {span, s, n} for every batch stage (judges, WavLM, NeMo, UTMOS)."""
+    prof = [] if prof is None else prof
+
+    def clock(span: str, fn: Callable) -> Callable:
+        def timed(*args, **kw):
+            t0 = time.monotonic()
+            out = fn(*args, **kw)
+            prof.append({"span": span, "s": time.monotonic() - t0, "n": len(args[0]) if args else 0})
+            return out
+        return timed
+
+    deps = dataclasses.replace(deps, embed=clock("wavlm", deps.embed), utmos=clock("utmos", deps.utmos),
+                               word_conf=clock("nemo", deps.word_conf))
+    judge = lambda name: clock(name, deps.generate)  # noqa: E731
     by_kind = defaultdict(list)
     for r in recs:
         r["scores"] = {}
@@ -622,14 +656,14 @@ def score(es: EvalSet, recs: list[dict], deps: Deps, cfg: EvalConfig) -> tuple[d
         rows[f"responsiveness/latency_s/{fam}"] = row([r["scores"]["latency_s"] for r in sub], seed)
 
     # voice-v0 judge, chronology, topic
-    rows |= judge_rows(es, prompts, by_kind["baited"], deps, cfg)
+    rows |= judge_rows(es, prompts, by_kind["baited"], dataclasses.replace(deps, generate=judge("judge_prompts")), cfg)
 
     # voice
     rows |= voice_rows(es, prompts + by_kind["baited"], by_kind["drift"], deps, cfg)
 
     if cfg.size == "full":
-        rows |= timed_rows(es, by_kind["timed"], deps.generate, seed)
-        rows |= fdb_rows(by_kind["fdb"], deps.generate, seed)
+        rows |= timed_rows(es, by_kind["timed"], judge("judge_timed"), seed)
+        rows |= fdb_rows(by_kind["fdb"], judge("judge_fdb"), seed)
         onset = [float(spurious_onset(r["words"])) for r in by_kind["onset"]]
         greet = [float(bool(words_in(r["words"], 0.0, ONSET_GRACE_S))) for r in by_kind["onset"]]
         rows["responsiveness/spurious_onset"] = rate_row(int(sum(onset)), len(onset))
@@ -806,6 +840,21 @@ def fdb_rows(items: list[dict], generate: Callable, seed: int = 0) -> dict:
 # ---------------------------------------------------------------- cost, side-by-sides, naturalness pairs
 
 
+def profile(recs: list[dict], batches: list[dict]) -> dict:
+    """Per-kind mean and max of every per-conversation span, and per-item seconds of each batch stage."""
+    items = defaultdict(lambda: defaultdict(list))
+    for r in recs:
+        for k, v in (r.get("spans") or {}).items():
+            items[r["kind"]][k].append(v)
+    stages = defaultdict(lambda: {"s": 0.0, "n": 0})
+    for b in batches:
+        stages[b["span"]]["s"] += b["s"]
+        stages[b["span"]]["n"] += b["n"]
+    return {"items": {kind: {k: {"mean": float(np.mean(v)), "max": float(np.max(v)), "n": len(v)}
+                             for k, v in spans.items()} for kind, spans in items.items()},
+            "stages": {k: v | {"per_item_s": v["s"] / v["n"] if v["n"] else None} for k, v in stages.items()}}
+
+
 def gpu_cost(recs: list[dict], concurrency: int) -> dict:
     """Billed endpoint time: every conversation's wall time (handshake included), plus
     one cold start and one idle scale-down window per container."""
@@ -847,7 +896,7 @@ def log_wandb(cfg: EvalConfig, es: EvalSet, report: dict, recs: list[dict], out:
 
     from shared import tracking
 
-    tag = "baseline" if cfg.system == "stock" else "candidate"
+    tag = "check" if cfg.check else "baseline" if cfg.system == "stock" else "candidate"
     with tracking.start_run("voice", cfg.group, report["config"], name=cfg.run_name, job_type="eval", gpu="CPU",
                             tags=[tag, cfg.backend]) as run:
         if not cfg.dry_run:
@@ -868,6 +917,11 @@ def log_wandb(cfg: EvalConfig, es: EvalSet, report: dict, recs: list[dict], out:
                          words, p["response_text"], passages_block(es.sources(pid)), r["scores"].get("latency_s")])
         run.log({"side_by_side": wandb.Table(columns=["id", "family", "question", "agent", "transcript", "reference",
                                                       "source", "latency_s"], data=rows)})
+        prof = report.get("profile", {})
+        run.log({"profile/items": wandb.Table(columns=["kind", "span", "mean_s", "max_s", "n"], data=[
+            [kind, k, v["mean"], v["max"], v["n"]] for kind, spans in prof.get("items", {}).items() for k, v in spans.items()]),
+            "profile/stages": wandb.Table(columns=["stage", "s", "n", "per_item_s"], data=[
+                [k, v["s"], v["n"], v["per_item_s"]] for k, v in prof.get("stages", {}).items()])})
         item_cols = ["id", "kind", "transcript", "transport_s", "scores"]
         run.log({"items": wandb.Table(columns=item_cols, data=[[r["id"], r["kind"], r["transcript"], r["transport_s"],
                                                                  json.dumps(r["scores"])] for r in recs])})
@@ -886,7 +940,8 @@ def evaluate(cfg: EvalConfig, es: EvalSet, deps: Deps) -> dict:
     jobs = plan(es, cfg, out / "inputs")
     recs = converse_all(jobs, deps, out, cfg.concurrency)
     talk_s = time.monotonic() - t0
-    rows, recs = score(es, recs, deps, cfg)
+    prof: list[dict] = []
+    rows, recs = score(es, recs, deps, cfg, prof)
     side_by_side = cfg.side_by_side or default_side_by_side(es)
     rubric_text = RUBRIC.read_text()
     import hashlib
@@ -905,6 +960,7 @@ def evaluate(cfg: EvalConfig, es: EvalSet, deps: Deps) -> dict:
         "dry_run": cfg.dry_run,
     }
     report = {"config": config, "rows": rows, "cost": gpu_cost(recs, cfg.concurrency) | {"wall_s": talk_s},
+              "profile": profile(recs, prof),
               "items": [{k: r[k] for k in ("id", "kind", "transport_s", "scores")} for r in recs]}
     (out / "report.json").write_text(json.dumps(report, indent=1, default=float) + "\n")
     return report
@@ -940,7 +996,7 @@ def _nemo_app():
     import modal
 
     app = modal.App(ASR_APP)
-    image = (modal.Image.debian_slim(python_version="3.11").apt_install("ffmpeg", "libsndfile1")
+    image = (modal.Image.debian_slim(python_version="3.13").apt_install("ffmpeg", "libsndfile1")
              .pip_install("nemo_toolkit[asr]==2.4.0", "soundfile"))
     volume = modal.Volume.from_name("voice-data", create_if_missing=True)
 

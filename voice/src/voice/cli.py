@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 import sys
 import tomllib
 from pathlib import Path
@@ -56,6 +57,9 @@ def parser() -> argparse.ArgumentParser:
             s.add_argument("--concurrency", type=int, default=1, help="conversations at once (voice-serve containers)")
             s.add_argument("--side-by-side", nargs="*", default=[], help="prompt ids for the side-by-sides")
             s.add_argument("--utmos", action="store_true", help="also score UTMOS22")
+            s.add_argument("--check", action="store_true", help="a deployment check: stage serve-smoke, tag check")
+            s.add_argument("--limit", nargs="*", default=[], metavar="KEY=N",
+                           help="at most N jobs per kind (prompt, baited, timed, onset, drift) or fdb/<v1|v1.5>")
             for knob in ("timed_n", "fdb_per_task", "onset_runs", "drift_runs"):
                 s.add_argument("--" + knob.replace("_", "-"), type=int, default=None)
             s.add_argument("--dry-run", action="store_true", help="synthetic eval set, fake endpoint and models, W&B off")
@@ -92,6 +96,7 @@ def eval_command(args) -> int:
     out = args.out or Path("voice/outputs/eval") / args.group / f"{args.backend}-{args.system}-{args.size}"
     knobs = {k: getattr(args, k) for k in ("timed_n", "fdb_per_task", "onset_runs", "drift_runs")
              if getattr(args, k) is not None}
+    knobs |= {"check": args.check, "limit": {k: int(n) for k, n in (x.split("=") for x in args.limit)}}
     if args.dry_run:
         os.environ["WANDB_MODE"] = "disabled"
         root = Path(tempfile.mkdtemp(prefix="voice-eval-dry-"))
@@ -117,7 +122,10 @@ def eval_command(args) -> int:
             teacher.stop()
     recs = [json.loads(line) for line in (cfg.out / "items.jsonl").read_text().splitlines()]
     scores = {i["id"]: i["scores"] for i in report["items"]}
+    t0 = time.monotonic()
     print(evals.log_wandb(cfg, es, report, [r | {"scores": scores[r["id"]]} for r in recs], cfg.out))
+    print(f"wandb logging: {time.monotonic() - t0:.1f} s")
+    print("profile:", json.dumps(report["profile"], indent=1))
     for name, r in sorted(report["rows"].items()):
         print(f"{name:45s} {r['value']!s:>22} [{r['ci_low']}, {r['ci_high']}] n={r['n']}")
     print(f"cost: {report['cost']}  report: {cfg.out / 'report.json'}")

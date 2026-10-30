@@ -354,3 +354,19 @@ def test_side_by_side_md_and_write(tmp_path):
     runs = [{"name": n, "baseline": True, "rows": rows, "side_by_side": [row]} for n, rows in RUNS.items()]
     paths = R.write(runs, tmp_path)
     assert set(paths) == {"table.md", "table.csv", "side-by-side.md", *R.FRONTIERS}
+
+
+def test_limit_caps_per_kind_and_fdb_version():
+    jobs = [E.Job(id=f"p{i}", kind="prompt", wav="", max_s=1) for i in range(5)]
+    jobs += [E.Job(id=f"f{i}{v}", kind="fdb", wav="", max_s=1, meta={"version": v}) for i in range(4) for v in ("v1", "v1.5")]
+    out = E.limit(jobs, {"prompt": 2, "fdb/v1.5": 1})
+    assert [j.id for j in out if j.kind == "prompt"] == ["p0", "p1"]
+    assert sum(j.meta.get("version") == "v1" for j in out) == 4 and sum(j.meta.get("version") == "v1.5" for j in out) == 1
+
+
+def test_profile_spans_and_stages():
+    recs = [{"kind": "prompt", "spans": {"converse_s": 10.0, "transcribe_s": 1.0}},
+            {"kind": "prompt", "spans": {"converse_s": 20.0, "transcribe_s": 3.0}}, {"kind": "onset"}]
+    p = E.profile(recs, [{"span": "wavlm", "s": 4.0, "n": 2}, {"span": "wavlm", "s": 2.0, "n": 1}])
+    assert p["items"]["prompt"]["converse_s"] == {"mean": 15.0, "max": 20.0, "n": 2}
+    assert p["stages"]["wavlm"] == {"s": 6.0, "n": 3, "per_item_s": 2.0}
