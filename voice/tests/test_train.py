@@ -113,3 +113,16 @@ def test_cli_deploy_takes_backend_dry_run(backend, path, capsys):
     """Every backend is served now; --dry-run exercises the CLI path without reaching Modal."""
     assert cli.main(["deploy", "--backend", backend, "--system", "stock", "--dry-run"]) == 0
     assert path in capsys.readouterr().out
+
+
+def test_serve_image_installs_what_a_wav_voice_prompt_needs():
+    """The fork's LMGen.load_voice_prompt(<.wav>) calls normalize_audio, which imports
+    pyloudnorm (scipy underneath); without them a .wav voice_prompt crashes the connection (#9)."""
+    import inspect
+
+    import voice.train
+    from moshi.models import lm
+
+    assert "import pyloudnorm" in inspect.getsource(lm.normalize_audio)
+    src = inspect.getsource(voice.train)
+    assert '"pyloudnorm==' in src and '"scipy==' in src
