@@ -997,7 +997,8 @@ def _nemo_app():
 
     app = modal.App(ASR_APP)
     image = (modal.Image.debian_slim(python_version="3.13").apt_install("ffmpeg", "libsndfile1")
-             .pip_install("nemo_toolkit[asr]==2.4.0", "soundfile"))
+             .pip_install("nemo_toolkit[asr]==2.4.0", "soundfile")
+             .pip_install("ml_dtypes==0.5.4"))  # onnx (via nemo) needs float4_e2m1fn, absent from the resolved ml_dtypes
     volume = modal.Volume.from_name("voice-data", create_if_missing=True)
 
     @app.function(image=image, cpu=8, memory=16384, timeout=3600, volumes={"/data": volume},
