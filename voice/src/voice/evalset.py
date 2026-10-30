@@ -17,7 +17,7 @@ and is skipped when its output exists):
     timed     60 two-minute user tracks with cue timestamps
     fdb       Full-Duplex-Bench v1 / v1.5 inputs laid out per task, licenses recorded
     manifest  evalset.json {version, seeds, counts, hashes, sizes, ...} + SHA256SUMS
-    upload    voice splits -> Modal volume voice-voice; clean passages -> voice-data
+    upload    voice splits -> Modal volume voice-voice; source passages (with labels) -> voice-data
     log       the artifact directory -> W&B artifact voice-evalset (project voice)
     ceiling   Pocket TTS cloned from the prompt segment vs the eval split (the voice ceiling),
               logged as its own W&B run (job_type tts-ceiling); a measurement, not an eval input,
@@ -86,7 +86,7 @@ SEEDS = {"voice": 0, "heldout": 0, "prompts": 0, "teacher": 0, "voices": 0, "smo
 LUFS = -24.0
 N_PROMPTS = 200
 FAMILY_SHARE = {"story": 0.5, "change": 0.3, "idea": 0.2}
-OVERGEN = {"story": 1.3, "idea": 1.3, "change": 2.0}  # composed per kept prompt; change pairs fail validation most
+OVERGEN = {"story": 1.8, "idea": 1.8, "change": 2.5}  # composed per kept prompt; topic hits on labelled sources and change-pair validation eat the rest
 MIN_PASSAGE_WORDS = 30
 SMOKE = {"story": 4, "change": 2, "idea": 1, "author": 1, "baited": 2}
 N_TIMED = 60
@@ -300,10 +300,13 @@ def overrides_record(path: Path | None, decisions: dict[str, str]) -> dict:
             **{d: sum(v == d for v in decisions.values()) for d in P.DECISIONS}}
 
 
-def build_passages(journal: Path, out: Path, deps: Deps, seed: int, overrides: Path | None = None) -> dict:
-    """Labelled passages (work/passages-labelled.jsonl, local only), the clean
-    pool and held-out pages for the voice-data volume, held-out passages for
-    the artifact."""
+def build_passages(journal: Path, out: Path, deps: Deps, seed: int, overrides: Path | None = None,
+                   previous_heldout: Path | None = None) -> dict:
+    """Labelled passages (work/passages-labelled.jsonl, local only); the source
+    pool (every passage the author did not exclude, with its labels) and the
+    held-out pages for the voice-data volume; held-out passages for the
+    artifact. With `previous_heldout` (an earlier build's heldout.json) its
+    pages are kept and only the passage ids are recomputed."""
     labelled_path = out / "work/passages-labelled.jsonl"
     if labelled_path.exists():
         labelled = P.read_passages(labelled_path)
@@ -312,15 +315,21 @@ def build_passages(journal: Path, out: Path, deps: Deps, seed: int, overrides: P
         P.write_jsonl(labelled, labelled_path)
     decisions = P.read_overrides(overrides) if overrides and overrides.exists() else {}
     labelled = P.apply_overrides(labelled, decisions)
-    clean = [p for p in labelled if p.clean]
-    pages = P.select_heldout_pages(labelled, seed=seed)
+    sources = [p for p in labelled if p.source]
+    previous = json.loads(previous_heldout.read_text())["pages"] if previous_heldout else None
+    pages = P.select_heldout_pages(labelled, seed=seed, previous=previous)
     held = P.heldout_passages(labelled, pages)
     counts = P.topic_counts(labelled)
     counts["overrides"] = overrides_record(overrides, decisions)
-    counts.update(heldout_pages=len(pages), heldout_passages=len(held),
-                  heldout_years=dict(sorted(Counter(p.year for p in held).items())))
-    heldout = {"pages": pages, "passage_ids": [p.passage_id for p in held], "seed": seed}
-    P.write_jsonl(clean, out / "voice-data/passages/passages.jsonl")
+    counts.update(source=len(sources), heldout_pages=len(pages), heldout_passages=len(held),
+                  heldout_years=dict(sorted(Counter(p.year for p in held).items())),
+                  heldout_by_topic=dict(Counter("borderline" if p.topic == "other" and p.borderline else p.topic
+                                                for p in held)),
+                  heldout_from={"path": str(previous_heldout), "sha256": sha256(previous_heldout)} if previous_heldout
+                  else None)
+    heldout = {"pages": pages, "passage_ids": [p.passage_id for p in held], "seed": seed,
+               "frozen_from": counts["heldout_from"]}
+    P.write_jsonl(sources, out / "voice-data/passages/passages.jsonl")
     write_json(out / "voice-data/passages/heldout.json", heldout)
     write_json(out / "voice-data/passages/topic_counts.json", counts)
     P.write_jsonl(held, out / "artifact/prompts/passages.jsonl")
@@ -448,6 +457,13 @@ def build_render(out: Path, deps: Deps, seed: int) -> dict:
     rng = random.Random(seed)
     counts = {}
     for name, src in (("prompts", "prompts-text"), ("baited", "baited-text")):
+        done = out / f"artifact/{name}/{name}.jsonl"
+        if name == "baited" and done.exists():  # fixed prompts: keep the earlier renders, refresh smoke flags
+            smoke = {r["id"]: r["smoke"] for r in read_jsonl(out / f"work/{src}.jsonl")}
+            rows = [{**r, "smoke": smoke[r["id"]]} for r in read_jsonl(done)]
+            P.write_jsonl(rows, done)
+            counts[name] = len(rows)
+            continue
         rows = []
         for r in read_jsonl(out / f"work/{src}.jsonl"):
             voice = rng.choice(OTHER_VOICES)
@@ -604,6 +620,10 @@ def build_manifest(out: Path, stats: dict) -> dict:
         },
         "voice": {k: v for k, v in stats["voice"].items() if k != "clips"},
         "passage_overrides": stats["passages"].get("overrides"),
+        "topic_rule": P.TOPIC_RULE,
+        "heldout_from": stats["passages"].get("heldout_from"),
+        "prompt_mix": {"target": FAMILY_SHARE,
+                       "actual": {f: round(n / len(prompts), 3) for f, n in Counter(r["family"] for r in prompts).items()}},
         "prompts_build": stats.get("prompts"),
         "teacher": {"model": TEACHER_MODEL, "with_context": False, "label_schema": P.LABEL_SCHEMA},
         "tts": {"engine": "kyutai pocket-tts", "version": _version("pocket-tts"), "user_voices": list(OTHER_VOICES)},
@@ -638,7 +658,7 @@ def _version(dist: str) -> str:
 
 def upload_volumes(out: Path) -> None:
     """voice-voice <- prompt/, finetune/, prompt-30s.wav, manifest.json;
-    voice-data <- passages/ (clean pool, held-out pages, topic counts)."""
+    voice-data <- passages/ (source pool with labels, held-out pages, topic counts)."""
     import modal
 
     for name, local in (("voice-voice", out / "voice-voice"), ("voice-data", out / "voice-data")):
@@ -765,7 +785,7 @@ def fixture(root: Path, seed: int = 0) -> dict[str, Path]:
     words = "garden river morning coffee project city friend walk book music letter window".split()
     md = []
     for k in range(48):
-        year, journal = 2021 + k % 4, ("Morning Pages", "Auto biography")[k % 2]
+        year, journal = 2021 + k % 4, ("Notebook A", "Notebook B")[k % 2]
         body = "\n".join(f"- I went to the {rng.choice(words)} and I felt the {rng.choice(words)} was close to my "
                          f"{rng.choice(words)} again. My {rng.choice(words)} and my {rng.choice(words)} stayed with me "
                          f"all day long." for _ in range(4))
@@ -797,7 +817,8 @@ STAGES = ("voice", "passages", "prompts", "render", "timed", "fdb", "manifest", 
 
 
 def build(out: Path, deps: Deps, journal: Path, voice_src: Path, questions: Path, fdb_src: Path | None,
-          stages: tuple[str, ...] = STAGES, dry_run: bool = False, overrides: Path | None = None) -> dict:
+          stages: tuple[str, ...] = STAGES, dry_run: bool = False, overrides: Path | None = None,
+          previous_heldout: Path | None = None) -> dict:
     """Run `stages` in order; each stage's result is kept in work/stats.json so
     later stages (and re-runs) can read it."""
     stats_path = out / "work/stats.json"
@@ -808,7 +829,7 @@ def build(out: Path, deps: Deps, journal: Path, voice_src: Path, questions: Path
         "voice": lambda: (art / "voice-eval/manifest.json").exists(),
         "passages": lambda: (art / "prompts/passages.jsonl").exists(),
         "prompts": lambda: (out / "work/prompts-text.jsonl").exists(),
-        "render": lambda: (art / "baited/baited.jsonl").exists(),
+        "render": lambda: (art / "prompts/prompts.jsonl").exists(),
         "ceiling": lambda: "ceiling" in stats,
         "timed": lambda: (art / "timed/tracks.jsonl").exists(),
         "fdb": lambda: (art / "fdb/index.json").exists(),
@@ -821,7 +842,7 @@ def build(out: Path, deps: Deps, journal: Path, voice_src: Path, questions: Path
         if stage == "voice":
             stats["voice"] = build_voice(voice_src, out, SEEDS["voice"])
         elif stage == "passages":
-            stats["passages"] = build_passages(journal, out, deps, SEEDS["heldout"], overrides)
+            stats["passages"] = build_passages(journal, out, deps, SEEDS["heldout"], overrides, previous_heldout)
         elif stage == "prompts":
             stats["prompts"] = build_prompts(out, deps, author_questions(questions), SEEDS["prompts"])
         elif stage == "render":
@@ -858,6 +879,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--questions", type=Path, default=AUTHOR_QUESTIONS)
     p.add_argument("--fdb", type=Path, default=None, help="directory holding v1.0/ and v1.5/ zips (default: download)")
     p.add_argument("--model", default=TEACHER_MODEL)
+    p.add_argument("--heldout", type=Path, default=None,
+                   help="an earlier build's heldout.json: keep its pages frozen, recompute the passage ids")
     args = p.parse_args(argv)
     stages = tuple(s for s in STAGES if s in (args.stage or STAGES))
     if args.dry_run:
@@ -869,7 +892,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     deps = real_deps(args.model)
     try:
-        build(args.out or OUT, deps, args.journal, args.voice, args.questions, args.fdb, stages, overrides=OVERRIDES)
+        build(args.out or OUT, deps, args.journal, args.voice, args.questions, args.fdb, stages, overrides=OVERRIDES,
+              previous_heldout=args.heldout)
     finally:
         from shared import teacher
 
