@@ -93,24 +93,42 @@ def test_classify_retries_once_then_excludes():
     assert counts["clean"] == 1 and counts["excluded"] == 2 and counts["topic/anger"] == 1
 
 
-def test_overrides_include_and_exclude(tmp_path):
-    ps = [P.Passage(passage_id=f"j-p001-0{i}", entry_date="2024-01-01", pages=[1], text="t", topic=t, borderline=b)
-          for i, (t, b) in enumerate([("sexuality", False), ("other", True), ("other", False), ("anger", True)])]
-    path = tmp_path / "passage_overrides.csv"
-    path.write_text('passage_id,entry_date,pages,topic,borderline,text,decision,note\n'
-                    'j-p001-00,2024-01-01,1,sexuality,false,"multi\nline",include,ok\n'
-                    'j-p001-01,2024-01-01,1,other,true,t,,\n'
-                    'j-p001-02,2024-01-01,1,other,false,t,Exclude,\n')
+def _overrides_csv(path, rows):
+    path.write_text("passage_id,entry_date,pages,topic,borderline,text,decision,note\n"
+                    + "".join(f'{pid},2024-01-01,1,other,false,"synthetic\ntext",{d},\n' for pid, d in rows))
+    return path
+
+
+def test_include_beats_each_exclusion_and_exclude_removes_other(tmp_path):
+    labels = [("sexuality", False), ("anger", False), ("other", True), ("other", False), ("other", False)]
+    ps = [P.Passage(passage_id=f"j-p001-0{i}", entry_date="2024-01-01", pages=[1], text="synthetic text",
+                    topic=t, borderline=b) for i, (t, b) in enumerate(labels)]
+    path = _overrides_csv(tmp_path / "o.csv", [("j-p001-00", "include"), ("j-p001-01", "INCLUDE"),
+                                                ("j-p001-02", "include"), ("j-p001-03", "exclude"), ("j-p001-04", "")])
     decisions = P.read_overrides(path)
-    assert decisions == {"j-p001-00": "include", "j-p001-02": "exclude"}
+    assert decisions == {"j-p001-00": "include", "j-p001-01": "include", "j-p001-02": "include", "j-p001-03": "exclude"}
     out = P.apply_overrides(ps, decisions)
-    assert [p.clean for p in out] == [True, False, False, False]
-    assert out[0].topic == "other" and out[1] == ps[1] and out[3] == ps[3]
+    assert [p.clean for p in out] == [True, True, True, False, True]
+    # the Teacher's labels are kept, so a later classifier pass still sees them
+    assert [(p.topic, p.borderline) for p in out] == labels
+    assert [p.override for p in out] == ["include", "include", "include", "exclude", None]
+    assert P.Passage.model_validate_json(out[0].model_dump_json()).override == "include"
     with pytest.raises(ValueError, match="do not exist"):
         P.apply_overrides(ps, {"nope-p001-00": "include"})
-    path.write_text("passage_id,decision\nj-p001-00,maybe\n")
+    (tmp_path / "bad.csv").write_text("passage_id,decision\nj-p001-00,maybe\n")
     with pytest.raises(ValueError, match="not one of"):
-        P.read_overrides(path)
+        P.read_overrides(tmp_path / "bad.csv")
+
+
+def test_overrides_record_hash_follows_the_file(tmp_path):
+    assert evalset.overrides_record(tmp_path / "missing.csv", {}) == {"path": None, "sha256": None,
+                                                                       "include": 0, "exclude": 0}
+    path = _overrides_csv(tmp_path / "o.csv", [("a-p001-00", "include")])
+    first = evalset.overrides_record(path, P.read_overrides(path))
+    _overrides_csv(path, [("a-p001-00", "exclude")])
+    second = evalset.overrides_record(path, P.read_overrides(path))
+    assert first["sha256"] and first["sha256"] != second["sha256"]
+    assert (first["include"], second["exclude"]) == (1, 1)
 
 
 # ---------------------------------------------------------------- validators
@@ -283,9 +301,11 @@ def test_dry_run_builds_the_whole_artifact(tmp_path, monkeypatch):
     monkeypatch.setenv("WANDB_MODE", "disabled")
     fx = evalset.fixture(tmp_path)
     out = tmp_path / "out"
-    stats = evalset.build(out, evalset.fake_deps(), fx["journal"], fx["voice"], fx["questions"], fx["fdb"], dry_run=True)
+    stats = evalset.build(out, evalset.fake_deps(), fx["journal"], fx["voice"], fx["questions"], fx["fdb"], dry_run=True,
+                          overrides=tmp_path / "no-overrides.csv")
     art = out / "artifact"
     m = json.loads((art / "evalset.json").read_text())
+    assert m["passage_overrides"]["sha256"] is None  # no overrides file: recorded as null, build continues
     assert m["version"] == evalset.VERSION and set(m["hashes"]) == {"prompts", "baited", "timed", "fdb", "voice-eval"}
     assert len(m["sizes"]["smoke"]["prompts"]) == 10
     assert m["counts"]["timed"] == 60 and m["counts"]["baited"] == 20

@@ -293,6 +293,13 @@ def build_voice(src: Path, out: Path, seed: int) -> dict:
 # ---------------------------------------------------------------- passages
 
 
+def overrides_record(path: Path | None, decisions: dict[str, str]) -> dict:
+    """What evalset.json records about the overrides file: sha256 null when there is none."""
+    present = bool(path and path.exists())
+    return {"path": str(path) if present else None, "sha256": sha256(path) if present else None,
+            **{d: sum(v == d for v in decisions.values()) for d in P.DECISIONS}}
+
+
 def build_passages(journal: Path, out: Path, deps: Deps, seed: int, overrides: Path | None = None) -> dict:
     """Labelled passages (work/passages-labelled.jsonl, local only), the clean
     pool and held-out pages for the voice-data volume, held-out passages for
@@ -309,9 +316,7 @@ def build_passages(journal: Path, out: Path, deps: Deps, seed: int, overrides: P
     pages = P.select_heldout_pages(labelled, seed=seed)
     held = P.heldout_passages(labelled, pages)
     counts = P.topic_counts(labelled)
-    counts["overrides"] = {"path": str(overrides) if decisions else None,
-                           "sha256": sha256(overrides) if decisions else None,
-                           **{d: sum(v == d for v in decisions.values()) for d in P.DECISIONS}}
+    counts["overrides"] = overrides_record(overrides, decisions)
     counts.update(heldout_pages=len(pages), heldout_passages=len(held),
                   heldout_years=dict(sorted(Counter(p.year for p in held).items())))
     heldout = {"pages": pages, "passage_ids": [p.passage_id for p in held], "seed": seed}

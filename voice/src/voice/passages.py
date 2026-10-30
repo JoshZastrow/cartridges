@@ -6,19 +6,21 @@ heading `## [<journal>:p.<page>] date: YYYY-MM-DD ...`. A passage is one to
 several consecutive sentences of one page:
 
     passages.jsonl: {passage_id, entry_date (YYYY-MM-DD), pages [int], text,
-                     topic (sexuality|anger|other), borderline (bool)}
+                     topic (sexuality|anger|other), borderline (bool), override (include|exclude|null)}
 
 `passage_id` is `<journal-slug>-p<page:03d>-<k:02d>`, so the journal a page
 number belongs to is in the id. Topic labels come from the Qwen Teacher
 through an injected `generate(batch, **kw) -> list[Completion | None]`
 (`shared.teacher.modal_generate`), one JSON-constrained call per passage.
-Only `topic == "other"` and `borderline == False` passages are clean; every
+Clean = `override == "include"`, or `topic == "other"`, `borderline == False`
+and no `exclude` override; every
 artifact downstream holds clean passages only.
 
 The author can override labels with `data/voice/passage_overrides.csv`
 (columns as the review export `excluded_passages.csv`; only rows with a
-`decision` count): `include` re-admits a passage (topic "other", not
-borderline), `exclude` removes any passage (marked borderline, so not clean).
+`decision` count). An overridden passage keeps the Teacher's `topic` and
+`borderline` and gains `override`: `include` re-admits it to the clean pool,
+`exclude` removes it. Downstream classifiers still see the Teacher's label.
 
 Held-out passages are chosen at the page level: every clean passage of a
 held-out page is held out, so no training passage shares a page with an eval
@@ -62,6 +64,7 @@ class Passage(BaseModel):
     text: str
     topic: Topic | None = None  # None until labelled
     borderline: bool = False
+    override: Literal["include", "exclude"] | None = None  # the author's decision; labels stay the Teacher's
 
     @property
     def year(self) -> int:
@@ -69,6 +72,8 @@ class Passage(BaseModel):
 
     @property
     def clean(self) -> bool:
+        if self.override is not None:
+            return self.override == "include"
         return self.topic == "other" and not self.borderline
 
 
@@ -220,12 +225,12 @@ def read_overrides(path: Path) -> dict[str, str]:
 
 
 def apply_overrides(passages: list[Passage], overrides: dict[str, str]) -> list[Passage]:
-    """`include` -> topic other, not borderline; `exclude` -> borderline (excluded). Unknown ids raise."""
+    """Set `override` on the named passages (labels untouched). Unknown ids raise."""
     unknown = set(overrides) - {p.passage_id for p in passages}
     if unknown:
         raise ValueError(f"overrides name passages that do not exist: {sorted(unknown)[:5]}")
-    updates = {"include": {"topic": "other", "borderline": False}, "exclude": {"borderline": True}}
-    return [p.model_copy(update=updates[overrides[p.passage_id]]) if p.passage_id in overrides else p for p in passages]
+    return [p.model_copy(update={"override": overrides[p.passage_id]}) if p.passage_id in overrides else p
+            for p in passages]
 
 
 # ---------------------------------------------------------------- held-out split
