@@ -12,19 +12,25 @@ several consecutive sentences of one page:
 number belongs to is in the id. Topic labels come from the Qwen Teacher
 through an injected `generate(batch, **kw) -> list[Completion | None]`
 (`shared.teacher.modal_generate`), one JSON-constrained call per passage.
-Clean = `override == "include"`, or `topic == "other"`, `borderline == False`
-and no `exclude` override; every
-artifact downstream holds clean passages only.
+Topic rule (TOPIC_RULE; brief §1b as of 7f7e4e6): filter what is spoken,
+not what is read. Every passage that the author has not excluded is a
+*source* (context, prompt source), whatever its label; every generated
+question and response must pass the topic classifier instead. Only the
+journal digest stays *clean*: `override == "include"`, or `topic == "other"`,
+`borderline == False` and no `exclude` override.
 
 The author can override labels with `data/voice/passage_overrides.csv`
 (columns as the review export `excluded_passages.csv`; only rows with a
 `decision` count). An overridden passage keeps the Teacher's `topic` and
-`borderline` and gains `override`: `include` re-admits it to the clean pool,
-`exclude` removes it. Downstream classifiers still see the Teacher's label.
+`borderline` and gains `override`: `include` admits it to the clean (digest) pool,
+`exclude` removes it everywhere. Downstream classifiers still see the
+Teacher's label.
 
-Held-out passages are chosen at the page level: every clean passage of a
+Held-out passages are chosen at the page level: every source passage of a
 held-out page is held out, so no training passage shares a page with an eval
-passage. Pages are drawn per journal year, so every year is represented.
+passage. Pages are drawn once per journal year (v0) and then frozen: a later
+build passes the previous pages and only the passage ids are recomputed, so
+neither an override nor a rule change moves a page between eval and training.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from pydantic import BaseModel
 
 Topic = Literal["sexuality", "anger", "other"]
 TOPICS: tuple[str, ...] = ("sexuality", "anger", "other")
+TOPIC_RULE = "spoken-1: sources any label; generated questions and responses filtered; digest clean (brief §1b, 7f7e4e6)"
 
 PAGE_HEADING = re.compile(r"^## \[(?P<journal>[^:\]]+):p\.(?P<page>\d+)\][^\n]*?date:\s*(?P<date>\d{4}-\d{2}-\d{2})[^\n]*$", re.M)
 # Markdown markers that carry no words: bullets, quotes, headings, arrows, rules.
@@ -71,7 +78,13 @@ class Passage(BaseModel):
         return int(self.entry_date[:4])
 
     @property
+    def source(self) -> bool:
+        """Usable as context or prompt source (any label) unless the author excluded it."""
+        return self.override != "exclude"
+
+    @property
     def clean(self) -> bool:
+        """Usable in the digest: labelled other and not borderline, or included by the author."""
         if self.override is not None:
             return self.override == "include"
         return self.topic == "other" and not self.borderline
@@ -236,9 +249,18 @@ def apply_overrides(passages: list[Passage], overrides: dict[str, str]) -> list[
 # ---------------------------------------------------------------- held-out split
 
 
-def select_heldout_pages(passages: list[Passage], frac: float = 0.1, min_per_year: int = 3, seed: int = 0) -> list[str]:
-    """Held-out page keys: `frac` of the pages with clean passages in every
-    journal year (at least `min_per_year`), drawn with `seed`. Sorted."""
+def select_heldout_pages(passages: list[Passage], frac: float = 0.1, min_per_year: int = 3, seed: int = 0,
+                         previous: list[str] | None = None) -> list[str]:
+    """Held-out page keys. With `previous` (the pages of an earlier build), those
+    pages, frozen. Otherwise `frac` of the pages with clean passages in every
+    journal year (at least `min_per_year`), drawn with `seed` (how v0 drew them).
+    Sorted."""
+    if previous is not None:
+        known = {page_key(p.passage_id) for p in passages}
+        missing = set(previous) - known
+        if missing:
+            raise ValueError(f"previous held-out pages not in the journal: {sorted(missing)[:5]}")
+        return sorted(previous)
     by_year: dict[int, set[str]] = defaultdict(set)
     for p in passages:
         if p.clean:
@@ -254,7 +276,7 @@ def select_heldout_pages(passages: list[Passage], frac: float = 0.1, min_per_yea
 
 def heldout_passages(passages: list[Passage], heldout_pages: Iterable[str]) -> list[Passage]:
     pages = set(heldout_pages)
-    return [p for p in passages if p.clean and page_key(p.passage_id) in pages]
+    return [p for p in passages if p.source and page_key(p.passage_id) in pages]
 
 
 # ---------------------------------------------------------------- IO

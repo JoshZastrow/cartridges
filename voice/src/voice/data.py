@@ -168,23 +168,34 @@ def compose(
 ) -> tuple[list[Prompt], dict]:
     """Compose and validate one prompt per item `(id, family, passages,
     question or None)`. A rejected item is regenerated once with another seed,
-    then skipped. `classify(texts)` is the topic classifier for the second
-    pass (`passages.classify` bound to a Teacher). Returns the accepted
-    prompts in item order and the rejection counts per check."""
+    then skipped. `classify(texts)` is the topic classifier (`passages.classify`
+    bound to a Teacher); it runs on the spoken question and the response of
+    every composition, since source passages may carry any label. Returns the
+    accepted prompts in item order and the rejection counts per check, with
+    classifier hits per side and label as `topic/<question|response>/<label>`."""
     accepted: dict[str, Prompt] = {}
     rejects: dict[str, int] = {}
     pending = list(items)
     for attempt in range(2):
+        if not pending:
+            break
         outs = generate([compose_messages(f, ps, q) for _, f, ps, q in pending], max_tokens=400,
                         seed=seed + attempt, json_schema=COMPOSE_SCHEMA, with_context=False)
         parsed = [parse_composed(c.text if c else None) for c in outs]
-        topics = classify([p[1] if p else "" for p in parsed])
+        spoken_q = [(item[3] or p[0]) if p else "" for item, p in zip(pending, parsed)]
+        labels = classify(spoken_q + [p[1] if p else "" for p in parsed])
         retry = []
-        for item, p, (topic, borderline) in zip(pending, parsed, topics):
+        for k, (item, p) in enumerate(zip(pending, parsed)):
             pid, family, ps, given_q = item
             fails = ["parse"] if p is None else validate(p[1], ps, family)
-            if p is not None and (topic != "other" or borderline):
-                fails.append("topic")
+            if p is not None:
+                hits = [(side, topic if topic != "other" else "borderline")
+                        for side, (topic, borderline) in (("question", labels[k]), ("response", labels[len(pending) + k]))
+                        if topic != "other" or borderline]
+                for side, label in hits:
+                    rejects[f"topic/{side}/{label}"] = rejects.get(f"topic/{side}/{label}", 0) + 1
+                if hits:
+                    fails.append("topic")
             for f in fails:
                 rejects[f] = rejects.get(f, 0) + 1
             if fails:

@@ -14,14 +14,14 @@ SR = evalset.SR
 
 JOURNAL = """# preamble
 
-## [Morning Pages:p.3] date: 2024-11-28 (est.)
+## [Notebook A:p.3] date: 2024-11-28 (est.)
 
 - I walked to the river this morning and I thought about the garden again.
 - My sister called. We talked for an hour about the old house!
 
 --
 
-## [Auto biography:p.12] date: 2022-03-01
+## [Notebook B:p.12] date: 2022-03-01
 
 I moved to the city in the spring. I didn't know anyone there, and my first job was at a bookshop.
 """
@@ -32,8 +32,8 @@ I moved to the city in the spring. I didn't know anyone there, and my first job 
 
 def test_parse_pages_reads_journal_page_and_date():
     pages = P.parse_pages(JOURNAL)
-    assert [(p.journal, p.page, p.date) for p in pages] == [("Morning Pages", 3, "2024-11-28"), ("Auto biography", 12, "2022-03-01")]
-    assert "preamble" not in pages[0].text and "Auto biography" not in pages[0].text
+    assert [(p.journal, p.page, p.date) for p in pages] == [("Notebook A", 3, "2024-11-28"), ("Notebook B", 12, "2022-03-01")]
+    assert "preamble" not in pages[0].text and "Notebook B" not in pages[0].text
 
 
 def test_sentences_drop_markdown_and_split_at_sentence_ends():
@@ -43,11 +43,11 @@ def test_sentences_drop_markdown_and_split_at_sentence_ends():
 
 
 def test_segment_groups_sentences_within_a_page():
-    page = P.Page(journal="Morning Pages", page=7, date="2025-01-02", text=" ".join(["One two three four five."] * 30))
+    page = P.Page(journal="Notebook A", page=7, date="2025-01-02", text=" ".join(["One two three four five."] * 30))
     ps = P.segment_page(page, min_words=20, max_words=40)
     assert all(20 <= len(p.text.split()) <= 40 for p in ps)
     assert " ".join(p.text for p in ps) == page.text.strip()
-    assert [p.passage_id for p in ps][:2] == ["morning-pages-p007-00", "morning-pages-p007-01"]
+    assert [p.passage_id for p in ps][:2] == ["notebook-a-p007-00", "notebook-a-p007-01"]
     assert all(p.pages == [7] and p.entry_date == "2025-01-02" for p in ps)
 
 
@@ -129,6 +129,60 @@ def test_overrides_record_hash_follows_the_file(tmp_path):
     second = evalset.overrides_record(path, P.read_overrides(path))
     assert first["sha256"] and first["sha256"] != second["sha256"]
     assert (first["include"], second["exclude"]) == (1, 1)
+
+
+def test_frozen_heldout_pages_survive_an_override_that_would_reshuffle_them():
+    ps = _passages()
+    # page 05 of 2021 (j-p2105) has no clean passage, so it is not in the v0 draw
+    ps = [p.model_copy(update={"topic": "anger"}) if P.page_key(p.passage_id) == "j-p2105" else p for p in ps]
+    v0 = P.select_heldout_pages(ps, frac=0.1, min_per_year=3, seed=1)
+    assert "j-p2105" not in v0
+    included = P.apply_overrides(ps, {"j-p2105-00": "include"})
+    assert P.select_heldout_pages(included, frac=0.1, min_per_year=3, seed=1) != v0  # an unfrozen redraw moves pages
+    frozen = P.select_heldout_pages(included, frac=0.1, min_per_year=3, seed=1, previous=v0)
+    assert frozen == v0
+    with pytest.raises(ValueError, match="not in the journal"):
+        P.select_heldout_pages(ps, previous=v0 + ["j-p999"])
+
+
+def test_sources_take_any_label_but_the_digest_stays_clean():
+    ps = [P.Passage(passage_id=f"j-p001-0{i}", entry_date="2024-01-01", pages=[1], text="synthetic text", topic=t,
+                    borderline=b) for i, (t, b) in enumerate([("sexuality", False), ("anger", True), ("other", True),
+                                                              ("other", False)])]
+    ps = P.apply_overrides(ps, {"j-p001-03": "exclude"})
+    assert [p.source for p in ps] == [True, True, True, False]
+    assert [p.clean for p in ps] == [False, False, False, False]
+    assert [p.passage_id for p in P.heldout_passages(ps, ["j-p001"])] == ["j-p001-00", "j-p001-01", "j-p001-02"]
+
+
+def test_compose_filters_spoken_text_not_the_source():
+    labelled = P.Passage(passage_id="a-p003-00", entry_date="2022-03-01", pages=[3], topic="anger", borderline=True,
+                         text="I moved to the city in the spring and I didn't know anyone there at all.")
+    clean_r = "I moved to the city in the spring and I didn't know anyone there at all. I moved to the city in the spring."
+    calls = []
+
+    def generate(batch, **kw):
+        calls.append(kw["seed"])
+        return [_completion(json.dumps({"question": "What happened in the spring?", "response": clean_r}))] * len(batch)
+
+    out, rejects = data.compose([("s0", "story", [labelled], None)], generate, lambda t: [("other", False)] * len(t))
+    assert [p.id for p in out] == ["s0"] and calls == [0]  # a labelled source yields an accepted response
+
+    seen = []
+
+    def classify(texts):  # the question is clean, the response hits the classifier both times
+        seen.append(len(texts))
+        n = len(texts) // 2
+        return [("other", False)] * n + [("anger", False)] * n
+
+    calls.clear()
+    out, rejects = data.compose([("s0", "story", [labelled], None)], generate, classify)
+    assert out == [] and calls == [0, 1] and seen == [2, 2]  # regenerated once, then skipped
+    assert rejects["topic/response/anger"] == 2 and rejects["skipped"] == 1 and "topic/question/anger" not in rejects
+
+    out, rejects = data.compose([("s0", "story", [labelled], None)], generate,
+                                lambda t: [("other", True)] * (len(t) // 2) + [("other", False)] * (len(t) // 2))
+    assert out == [] and rejects["topic/question/borderline"] == 2  # a question hit rejects as well
 
 
 # ---------------------------------------------------------------- validators
@@ -306,6 +360,8 @@ def test_dry_run_builds_the_whole_artifact(tmp_path, monkeypatch):
     art = out / "artifact"
     m = json.loads((art / "evalset.json").read_text())
     assert m["passage_overrides"]["sha256"] is None  # no overrides file: recorded as null, build continues
+    assert m["topic_rule"] == P.TOPIC_RULE and m["heldout_from"] is None
+    assert set(m["prompt_mix"]["target"]) == {"story", "change", "idea"}
     assert m["version"] == evalset.VERSION and set(m["hashes"]) == {"prompts", "baited", "timed", "fdb", "voice-eval"}
     assert len(m["sizes"]["smoke"]["prompts"]) == 10
     assert m["counts"]["timed"] == 60 and m["counts"]["baited"] == 20
@@ -333,6 +389,16 @@ def test_dry_run_builds_the_whole_artifact(tmp_path, monkeypatch):
     assert all(len(t["cues"]) == 4 and (art / "timed" / t["wav"]).exists() for t in tracks)
     sums = (art / "SHA256SUMS").read_text().splitlines()
     assert len(sums) > 100 and not any(line.endswith("evalset.json") for line in sums)
+
+    # a rebuild from the previous heldout.json keeps its pages
+    v0 = art / "prompts/heldout.json"
+    frozen = (tmp_path / "v0-heldout.json")
+    frozen.write_text(v0.read_text())
+    out2 = tmp_path / "out2"
+    evalset.build(out2, evalset.fake_deps(), fx["journal"], fx["voice"], fx["questions"], fx["fdb"],
+                  stages=("passages",), dry_run=True, previous_heldout=frozen)
+    again_held = json.loads((out2 / "artifact/prompts/heldout.json").read_text())
+    assert again_held["pages"] == held["pages"] and again_held["frozen_from"]["sha256"] == evalset.sha256(frozen)
 
     # re-running resumes: nothing is rebuilt
     again = evalset.build(out, evalset.fake_deps(), fx["journal"], fx["voice"], fx["questions"], fx["fdb"],
