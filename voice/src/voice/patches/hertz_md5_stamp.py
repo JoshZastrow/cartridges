@@ -13,7 +13,8 @@ The patch replaces `load_ckpt` in upstream's modules with one that:
 - on a mismatch deletes the file and downloads it once more, as upstream does;
   a second mismatch raises. Unlike upstream it also deletes the blob the cache
   symlink points at: removing only the symlink lets `hf_hub_download` relink
-  the same bad blob, and upstream's retry loops forever.
+  the same bad blob, and upstream's retry loops forever. It refuses to delete
+  a blob whose realpath is not under `HF_HUB_CACHE`.
 
 The MD5 is an integrity check against truncated or corrupted downloads, not a
 security control. The stamp keeps that check for any change that touches the
@@ -85,8 +86,13 @@ def download(name: str) -> str:
 
 
 def remove(path: str) -> None:
-    """The cache symlink, the blob it points at, and the stamp."""
-    for p in {os.path.realpath(path), path, str(stamp_path(path))}:
+    """The cache symlink, the blob it points at, and the stamp. Refuses a blob outside `HF_HUB_CACHE`."""
+    from huggingface_hub import constants
+
+    blob, cache = os.path.realpath(path), os.path.realpath(constants.HF_HUB_CACHE)
+    if os.path.commonpath([blob, cache]) != cache:
+        raise RuntimeError(f"refusing to delete {blob}: not under HF_HUB_CACHE {cache}")
+    for p in {blob, path, str(stamp_path(path))}:
         if os.path.lexists(p):
             os.remove(p)
 
