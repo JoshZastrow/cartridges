@@ -647,7 +647,14 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
 - **#21.** Inference half of `hertz`. `inference_server.py` is the
   server; the prompt wav is the author's clip. Document what happens at
   2048 frames (the cache raises), because #12 has to design the window
-  around it. CUDA image variant; `torch==2.5.1`.
+  around it. CUDA image variant. *Shipped (PR #28):* hertz runs on the
+  workspace torch 2.14 (the author's decision; parity with 2.5.1 at bf16
+  noise) with `patches/hertz_sdpa.py` restricting SDPA to flash/efficient
+  (62.5 ms live step). Context: an assert past 2048 frames, or a shape error
+  at 1024 with the upstream server's default cache. The 30 s prompt uses 238
+  frames, which leaves about 226 s of live audio before the server closes
+  with "context full". Cold start is about 352 s, mostly the CPU fp32 build;
+  #27 fixes it.
 - **#22.** The eval set is the first artifact and is versioned from day
   one; a change to any prompt, track or split is a new version, and runs
   record which version they used. Passages and topic exclusion live here
@@ -770,8 +777,14 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   cartridge has two groups, `lm` and `resyn`. `build_prefix` renders persona
   and digest with Pocket TTS and must fit, with the voice clip, in ≤ 720
   frames (90 s). Parity test as #8, against `completion` on the stock prompt
-  wav. CUDA only, `torch==2.5.1` pinned in `voice/pyproject.toml` as an
-  extra (`voice[hertz]`) so the PersonaPlex path keeps its own torch.
+  wav. CUDA only. *Updated after #21:* hertz runs on the workspace torch
+  2.14, with no pin in the `voice[hertz]` extra. Keep EFFICIENT in the
+  hertz_sdpa allowed set, because the prefix mask needs it. Upstream puts
+  generic module names (`model`, `transformer`) on sys.path, so import them
+  only after the hertz path is set and watch for shadowing. Re-check the
+  codec round trip in bf16 on the GPU (#21 checked it in fp32 on the CPU:
+  identical transcripts on 10 of 10). Reuse `voice/scripts/hertz_parity.py`
+  from #27.
 
 ## 7. Protocol, in order
 
