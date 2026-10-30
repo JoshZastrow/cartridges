@@ -3,6 +3,7 @@
     uv run voice deploy --backend hertz --system stock               # voice.deploy: app voice-serve, web function "hertz"
     uv run python -m voice.deploy_hertz --dry-run                     # CPU stand-in behind the real app; no Modal
     uv run python -m voice.deploy_hertz --probe-context 1024 2048     # what the stock model does when its cache fills
+    uv run python -m voice.deploy_hertz --profile [--group exp-...]   # one cold start, timed per stage
 
 `voice.deploy` holds the web function (app `voice-serve`, proxy auth, one
 container, scale to zero); it runs `start` in a container built from `image`.
@@ -17,15 +18,31 @@ never name one.
 
 `image` is the workspace versions (root uv.lock: torch 2.14.1, numpy 2.3.5,
 einops 0.9.0.dev0, hf-hub 1.32.0); #18 reuses it for training. hertz-dev pins
-torch 2.5.1 but runs unpatched on 2.14 (bf16-level differences, measured on
-#21). Upstream's code is cloned at `UPSTREAM_COMMIT` into /opt/hertz-dev; its
-four checkpoints download from the HF repo si-pbc/hertz-dev into
-`voice-data:hf-cache` on first start (about 17 GB) and load from there after.
+torch 2.5.1 and runs here on 2.14 with three patches from `voice.patches`,
+applied in `HertzBackend.load` (upstream's tree is unchanged): `hertz_sdpa`
+(flash/efficient attention; 2.14's default kernel is ~2.5x slower, #21),
+`hertz_md5_stamp` and `hertz_fast_build` (#27, below). Outputs match 2.5.1 at
+the bf16 floor (`voice/scripts/hertz_parity.py`). Upstream's code is cloned at
+`UPSTREAM_COMMIT` into /opt/hertz-dev; its four checkpoints (20.6 GB) download
+from the HF repo si-pbc/hertz-dev into `voice-data:hf-cache` on first start
+and load from there after.
+
+Cold start (#27, H200, v1 Volume reads 1.2-1.7 GB/s cold): about 31 s from
+container start to listening, 91 s on the first start after a checkpoint
+changes, down from ~352 s. Upstream MD5s every checkpoint on every start
+(38 s) and random-initialises the fp32 model on the CPU before loading it
+(293 s). `hertz_md5_stamp` hashes once and leaves `<file>.md5stamp` next to
+the checkpoint, trusted while size and mtime_ns match; `loaded_backend`
+commits the Volume so stamps persist. `hertz_fast_build` builds with
+parameters on meta and assigns the checkpoint tensors. `--profile` times
+each stage of one cold start.
 """
 
 import argparse
+import contextlib
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -34,6 +51,7 @@ import modal
 
 from voice.backends.hertz import CHECKPOINT, CONTEXT_FRAMES, UPSTREAM, UPSTREAM_COMMIT
 
+T_IMPORT = time.time()  # wall clock once this module's imports are done; in a container, ~Python start + imports
 logger = logging.getLogger(__name__)
 
 GPU = "H200"
@@ -132,6 +150,87 @@ def probe_context(prompt: str, cache_lens: list[int]) -> list[dict]:
     return rows
 
 
+@probe_app.function(gpu=GPU, volumes=volumes, secrets=[modal.Secret.from_name("HF_TOKEN")], timeout=3600)
+def profile_load(t_call: float, prompt: str) -> list[dict]:
+    """One cold start in the server's order, one row per stage (seconds). The
+    first reader of each checkpoint reads it cold: the MD5 when a file has no
+    valid stamp, else `torch.load`. A warm re-read of the same files follows."""
+    import numpy as np
+    import torch
+
+    from voice.backends.hertz import CHUNK
+    from voice.patches import hertz_fast_build, hertz_md5_stamp
+
+    rows = [{"stage": "container start to Python + module imports", "s": round(T_IMPORT - t_call, 1)}]
+    t0 = time.perf_counter()
+    sys.path.insert(0, os.environ.get("HERTZ_DEV_DIR", "/opt/hertz-dev"))
+    import model  # noqa: F401  upstream; cached for load()
+    rows.append({"stage": "imports (upstream)", "s": round(time.perf_counter() - t0, 1)})
+
+    calls = {"md5": [], "torch.load": [], "build": []}
+
+    def timed(fn, key):
+        def wrapped(*a, **k):
+            t = time.perf_counter()
+            out = fn(*a, **k)
+            path = a[0] if key != "build" else None
+            calls[key].append((path, os.path.getsize(path) if path else 0, time.perf_counter() - t))
+            return out
+        return wrapped
+
+    md5, load, build = hertz_md5_stamp.md5, torch.load, hertz_fast_build.build
+    hertz_md5_stamp.md5, torch.load, hertz_fast_build.build = timed(md5, "md5"), timed(load, "torch.load"), timed(
+        build, "build")
+    try:
+        b = loaded_backend(prompt)
+    finally:
+        hertz_md5_stamp.md5, torch.load, hertz_fast_build.build = md5, load, build
+
+    def stage(name, key):
+        n, s = sum(c[1] for c in calls[key]), sum(c[2] for c in calls[key])
+        return {"stage": name, "s": round(s, 1), "GB": round(n / 1e9, 2), "MB_s": round(n / 1e6 / s) if s else None,
+                "files": [Path(c[0]).name for c in calls[key]]}
+
+    rows += [stage("MD5 (files without a valid stamp)", "md5"), stage("torch.load", "torch.load")]
+    build_s = calls["build"][0][2]
+    rows.append({"stage": "model build + load_state_dict (fast build)",
+                 "s": round(build_s - rows[-1]["s"] - rows[-2]["s"], 1),
+                 "missing_keys": sum(len(r["missing"]) for r in b.loads)})
+    rows.append({"stage": ".bfloat16().to(cuda)", "s": round(b.load_s - build_s, 1)})
+
+    t0 = time.perf_counter()
+    s = b.session()
+    for _ in range(8):
+        s.step(np.zeros(CHUNK, np.float32))
+    s.close()
+    rows.append({"stage": "warm-up (prompt prefill + 8 live steps)", "s": round(time.perf_counter() - t0, 1)})
+    t0 = time.perf_counter()
+    server = b.serve(None, 8998)
+    rows.append({"stage": "server listening", "s": round(time.perf_counter() - t0, 1)})
+    server.server.should_exit = True
+    rows.append({"stage": "total (container start to listening)", "s": round(sum(r["s"] for r in rows), 1)})
+
+    n, t0 = 0, time.perf_counter()
+    for path, *_ in calls["torch.load"]:
+        with open(path, "rb") as f:
+            while block := f.read(64 << 20):
+                n += len(block)
+    s = time.perf_counter() - t0
+    rows.append({"stage": "raw read, warm (after the total)", "s": round(s, 1), "GB": round(n / 1e9, 2),
+                 "MB_s": round(n / 1e6 / s)})
+    rows.append({"stage": "peak VRAM GiB", "s": None, "GiB": round(torch.cuda.max_memory_allocated() / 2**30, 2)})
+    return rows
+
+
+def log_profile(rows: list[dict], run) -> None:
+    """The stage table and `profile/<stage>_s` summaries on a W&B run."""
+    import wandb
+
+    run.log({"profile/stages": wandb.Table(columns=["stage", "s", "detail"], data=[
+        [r["stage"], r["s"], json.dumps({k: v for k, v in r.items() if k not in ("stage", "s")})] for r in rows])})
+    run.summary.update({f"profile/{r['stage'].split(' (')[0].replace(' ', '_')}_s": r["s"] for r in rows})
+
+
 def dry_run(prompt: str | None = None, cache_len: int = CONTEXT_FRAMES, steps: int = 16) -> dict:
     """CPU, no Modal: the backend with `CpuStandIn` behind the real app, driven
     through the wire protocol for `steps` chunks, then a rollout. `prompt` is a
@@ -164,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--prompt", default=None, help="--dry-run: a local wav; --probe-context: a bare name on voice-voice")
     p.add_argument("--probe-context", type=int, nargs="+", metavar="CACHE_LEN",
                    help="run the stock model past these cache lengths on Modal")
+    p.add_argument("--profile", action="store_true", help="time each stage of one cold start on Modal")
+    p.add_argument("--group", default="", help="--profile: W&B group exp-YYYYMMDD-<slug>; empty: no W&B run")
     args = p.parse_args(argv)
     if args.dry_run:
         dry_run(args.prompt)
@@ -171,8 +272,23 @@ def main(argv: list[str] | None = None) -> int:
         with modal.enable_output(), probe_app.run():
             rows = probe_context.remote(safe_name(args.prompt or DEFAULT_PROMPT), args.probe_context)
         print(json.dumps(rows, indent=2))
+    elif args.profile:
+        prompt = safe_name(args.prompt or DEFAULT_PROMPT)
+        with contextlib.ExitStack() as stack:
+            run = None
+            if args.group:
+                from shared import tracking
+
+                run = stack.enter_context(tracking.start_run(
+                    "voice", args.group, vars(args), name="hertz/stock/serve-smoke", job_type="eval", gpu=GPU,
+                    tags=["check", "hertz", "profile"]))
+            with modal.enable_output(), probe_app.run():
+                rows = profile_load.remote(time.time(), prompt)
+            if run is not None:
+                log_profile(rows, run)
+        print(json.dumps(rows, indent=2))
     else:
-        p.error("deploy with `voice deploy --backend hertz`; here: --dry-run or --probe-context")
+        p.error("deploy with `voice deploy --backend hertz`; here: --dry-run, --probe-context or --profile")
     return 0
 
 
