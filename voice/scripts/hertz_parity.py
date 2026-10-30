@@ -18,8 +18,10 @@ outputs from upstream's pinned torch 2.5.1+cu124 (`2.5.1.pt`; `2.14.1.pt` is
 2.14 unpatched). Pass criteria are the bf16 floor measured on #21 (torch 2.14
 + hertz_sdpa: latents 0.031, logits 1 ulp at |176|, KL 0.022 / 0.023 nats,
 argmax agreement 0.845 / 0.853, generation within 0.016 for frames 0-7 and
-divergent from frame 8 as sampling forks at near-ties, live step 62.5 ms).
-Exits 1 if any check fails.
+divergent from frame 8 as sampling forks at near-ties); these are `LIMITS`.
+The live step is reported, not gated: it varies 62.5-75 ms across H200s
+(#21, #27), all inside the 125 ms real-time budget. Exits 1 if any check in
+`LIMITS` fails.
 
 Written by impl-21 on #21; committed on #27 so later load changes and #18 re-run it.
 """

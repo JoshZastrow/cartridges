@@ -13,8 +13,9 @@ from voice.patches import hertz_md5_stamp as patch
 
 
 @pytest.fixture
-def ckpt(tmp_path):
-    """A checkpoint in an HF-cache-like layout: snapshot symlink -> blob."""
+def ckpt(tmp_path, monkeypatch):
+    """A checkpoint in an HF-cache-like layout under HF_HUB_CACHE: snapshot symlink -> blob."""
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path))
     blob = tmp_path / "blobs" / "abc"
     blob.parent.mkdir()
     torch.save({"w": torch.arange(4)}, blob)
@@ -144,6 +145,15 @@ def test_corrupted_file_recovers_when_the_redownload_is_good(ckpt, monkeypatch):
     monkeypatch.setattr(patch, "download", download)
     assert torch.equal(patch.load_ckpt("inference_x", digest)["w"], torch.arange(4))
     assert patch.stamped(path, digest)
+
+
+def test_remove_refuses_a_blob_outside_the_cache(ckpt, tmp_path, monkeypatch):
+    path, _ = ckpt
+    blob = path.resolve()
+    monkeypatch.setattr("huggingface_hub.constants.HF_HUB_CACHE", str(tmp_path / "snapshots"))
+    with pytest.raises(RuntimeError, match="not under HF_HUB_CACHE"):
+        patch.remove(str(path))
+    assert blob.exists() and path.is_symlink()
 
 
 def test_apply_rebinds_load_ckpt_in_upstream_modules(monkeypatch):
