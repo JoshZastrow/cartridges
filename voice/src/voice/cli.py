@@ -1,10 +1,11 @@
-"""`voice` command line: encode | train | eval | report | deploy | serve-local, each with --backend.
+"""`voice` command line: encode | train | eval | report | deploy | serve-local, each with --backend; evalset.
 
     uv run voice train --config sft.toml [--dry-run]
     uv run voice deploy --backend personaplex --system stock     # Modal app voice-serve; prints the WebSocket URL
     uv run voice serve-local --backend personaplex [--port 8998] # the same server on this machine's GPU
+    uv run voice evalset [--dry-run] [--stage ...]               # build voice-evalset (python -m voice.evalset)
 
-`train` (#19), `deploy` and `serve-local` (#20) are implemented; the rest are
+`train` (#19), `deploy` and `serve-local` (#20), `evalset` (#22) are implemented; the rest are
 stubs naming the issue that ships them.
 """
 
@@ -38,6 +39,7 @@ def parser() -> argparse.ArgumentParser:
             s.add_argument("--dry-run", action="store_true", help="no Modal calls; print the URL shape")
         if name == "serve-local":
             s.add_argument("--port", type=int, default=8998)
+    sub.add_parser("evalset", add_help=False, help="build the eval set; arguments as `python -m voice.evalset`")
     return p
 
 
@@ -62,6 +64,11 @@ def train_command(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["evalset"]:
+        from voice import evalset
+
+        return evalset.main(argv[1:])
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     args = parser().parse_args(argv)
     if args.command == "train":
