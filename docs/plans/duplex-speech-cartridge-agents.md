@@ -790,7 +790,9 @@ uv run voice report --runs <report.json ...> --out <dir>     # table, two fronti
   after that, and builds with parameters on meta plus the checkpoint tensors
   assigned (no random init; a missing weight raises). Any change to the load
   path re-runs `voice/scripts/hertz_parity.py` (from #27) against
-  `voice-data:/hertz-parity/2.5.1.pt`.
+  `voice-data:/hertz-parity/2.5.1.pt`. `assign=True` would untie shared
+  weights. Upstream ties none at 21670d7, but if a cartridge path ever ties
+  weights, re-tie them after `hertz_fast_build.build`.
 
 ## 7. Protocol, in order
 
