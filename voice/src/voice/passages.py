@@ -15,6 +15,11 @@ through an injected `generate(batch, **kw) -> list[Completion | None]`
 Only `topic == "other"` and `borderline == False` passages are clean; every
 artifact downstream holds clean passages only.
 
+The author can override labels with `data/voice/passage_overrides.csv`
+(columns as the review export `excluded_passages.csv`; only rows with a
+`decision` count): `include` re-admits a passage (topic "other", not
+borderline), `exclude` removes any passage (marked borderline, so not clean).
+
 Held-out passages are chosen at the page level: every clean passage of a
 held-out page is held out, so no training passage shares a page with an eval
 passage. Pages are drawn per journal year, so every year is represented.
@@ -22,6 +27,7 @@ passage. Pages are drawn per journal year, so every year is represented.
 
 from __future__ import annotations
 
+import csv
 import json
 import random
 import re
@@ -192,6 +198,34 @@ def topic_counts(passages: list[Passage]) -> dict:
         "clean": sum(p.clean for p in passages),
         "excluded": sum(not p.clean for p in passages),
     }
+
+
+# ---------------------------------------------------------------- author overrides
+
+DECISIONS = ("include", "exclude")
+
+
+def read_overrides(path: Path) -> dict[str, str]:
+    """passage_id -> include | exclude from the overrides CSV; rows without a decision are ignored."""
+    out = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            decision = (row.get("decision") or "").strip().lower()
+            if not decision:
+                continue
+            if decision not in DECISIONS:
+                raise ValueError(f"{path}: {row['passage_id']}: decision {decision!r} is not one of {DECISIONS}")
+            out[row["passage_id"]] = decision
+    return out
+
+
+def apply_overrides(passages: list[Passage], overrides: dict[str, str]) -> list[Passage]:
+    """`include` -> topic other, not borderline; `exclude` -> borderline (excluded). Unknown ids raise."""
+    unknown = set(overrides) - {p.passage_id for p in passages}
+    if unknown:
+        raise ValueError(f"overrides name passages that do not exist: {sorted(unknown)[:5]}")
+    updates = {"include": {"topic": "other", "borderline": False}, "exclude": {"borderline": True}}
+    return [p.model_copy(update=updates[overrides[p.passage_id]]) if p.passage_id in overrides else p for p in passages]
 
 
 # ---------------------------------------------------------------- held-out split

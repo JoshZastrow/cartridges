@@ -1,0 +1,12 @@
+Third-party code in voice/src/voice/vendor/
+
+ecapa_tdnn.py
+  Source:  microsoft/UniSpeech, downstreams/speaker_verification/models/ecapa_tdnn.py,
+           commit 40ac183e772abdcbf3a318eccffaa70c0cfd3a74
+  License: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/)
+  Credit:  Microsoft, the UniSpeech authors; part of the code from lawlict/ECAPA-TDNN
+  Scope:   the ECAPA-TDNN head classes, unmodified except imports. ShareAlike applies to this
+           file and changes to it. Used by voice/src/voice/speaker.py.
+
+Not vendored: the speaker-verification checkpoint wavlm_large_finetune.pth (CC BY-SA 3.0) is
+downloaded at runtime and checked against its sha256; it is never committed.

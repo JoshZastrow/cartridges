@@ -23,6 +23,11 @@ and is skipped when its output exists):
               logged as its own W&B run (job_type tts-ceiling); a measurement, not an eval input,
               so it is not in the artifact
 
+Versions: `evalset.json`'s `version` is the version of this file format
+(schema). Which eval set a run used is the W&B artifact version it records
+(`voice-evalset:v0` is the first); any change to a prompt, track or split
+is a new artifact version.
+
 Artifact layout (brief §5):
 
     evalset.json  SHA256SUMS
@@ -73,6 +78,7 @@ DATA = Path(os.environ.get("VOICE_DATA", "data"))  # the main checkout's data/ (
 JOURNAL = DATA / "journals/output/2026_10_13/teacher_context.md"
 VOICE_SRC = DATA / "voice/josh-thoughts-1.m4a"
 AUTHOR_QUESTIONS = DATA / "cartridge/user_questions.jsonl"
+OVERRIDES = DATA / "voice/passage_overrides.csv"  # the author's label overrides; optional
 OUT = Path("voice/outputs/evalset")
 TEACHER_MODEL = "Qwen/Qwen3.8-27B"
 SEEDS = {"voice": 0, "heldout": 0, "prompts": 0, "teacher": 0, "voices": 0, "smoke": 0, "timed": 0, "bootstrap": 0}
@@ -287,7 +293,7 @@ def build_voice(src: Path, out: Path, seed: int) -> dict:
 # ---------------------------------------------------------------- passages
 
 
-def build_passages(journal: Path, out: Path, deps: Deps, seed: int) -> dict:
+def build_passages(journal: Path, out: Path, deps: Deps, seed: int, overrides: Path | None = None) -> dict:
     """Labelled passages (work/passages-labelled.jsonl, local only), the clean
     pool and held-out pages for the voice-data volume, held-out passages for
     the artifact."""
@@ -297,10 +303,15 @@ def build_passages(journal: Path, out: Path, deps: Deps, seed: int) -> dict:
     else:
         labelled = P.label(P.segment(P.parse_pages(journal.read_text())), deps.generate, seed=SEEDS["teacher"])
         P.write_jsonl(labelled, labelled_path)
+    decisions = P.read_overrides(overrides) if overrides and overrides.exists() else {}
+    labelled = P.apply_overrides(labelled, decisions)
     clean = [p for p in labelled if p.clean]
     pages = P.select_heldout_pages(labelled, seed=seed)
     held = P.heldout_passages(labelled, pages)
     counts = P.topic_counts(labelled)
+    counts["overrides"] = {"path": str(overrides) if decisions else None,
+                           "sha256": sha256(overrides) if decisions else None,
+                           **{d: sum(v == d for v in decisions.values()) for d in P.DECISIONS}}
     counts.update(heldout_pages=len(pages), heldout_passages=len(held),
                   heldout_years=dict(sorted(Counter(p.year for p in held).items())))
     heldout = {"pages": pages, "passage_ids": [p.passage_id for p in held], "seed": seed}
@@ -587,13 +598,14 @@ def build_manifest(out: Path, stats: dict) -> dict:
                      "timed": [r["id"] for r in timed], "fdb": sorted(FDB_TASKS)},
         },
         "voice": {k: v for k, v in stats["voice"].items() if k != "clips"},
+        "passage_overrides": stats["passages"].get("overrides"),
         "prompts_build": stats.get("prompts"),
         "teacher": {"model": TEACHER_MODEL, "with_context": False, "label_schema": P.LABEL_SCHEMA},
         "tts": {"engine": "kyutai pocket-tts", "version": _version("pocket-tts"), "user_voices": list(OTHER_VOICES)},
         "asr": {"engine": "FermionResearch/Phonon-2", "package": f"fermion-research {_version('fermion-research')}"},
         "speaker_embedder": {"id": SPEAKER_MODEL, "checkpoint": f"{speaker.CHECKPOINT_REPO}/{speaker.CHECKPOINT_FILE}",
-                             "checkpoint_sha256": speaker.CHECKPOINT_SHA256, "head_url": speaker.HEAD_URL,
-                             "head_sha256": speaker.HEAD_SHA256},
+                             "checkpoint_sha256": speaker.CHECKPOINT_SHA256,
+                             "head": "voice.vendor.ecapa_tdnn (UniSpeech 40ac183)"},
         "timed_layout": {"track_s": TRACK_S, "lead_s": LEAD_S, "backchannel_after_question_s": BACKCHANNEL_AFTER_S,
                          "interrupt_after_question_s": INTERRUPT_AFTER_S, "silence_s": SILENCE_S,
                          "cue_types": ["question", "backchannel", "interruption", "silence"]},
@@ -780,7 +792,7 @@ STAGES = ("voice", "passages", "prompts", "render", "timed", "fdb", "manifest", 
 
 
 def build(out: Path, deps: Deps, journal: Path, voice_src: Path, questions: Path, fdb_src: Path | None,
-          stages: tuple[str, ...] = STAGES, dry_run: bool = False) -> dict:
+          stages: tuple[str, ...] = STAGES, dry_run: bool = False, overrides: Path | None = None) -> dict:
     """Run `stages` in order; each stage's result is kept in work/stats.json so
     later stages (and re-runs) can read it."""
     stats_path = out / "work/stats.json"
@@ -804,7 +816,7 @@ def build(out: Path, deps: Deps, journal: Path, voice_src: Path, questions: Path
         if stage == "voice":
             stats["voice"] = build_voice(voice_src, out, SEEDS["voice"])
         elif stage == "passages":
-            stats["passages"] = build_passages(journal, out, deps, SEEDS["heldout"])
+            stats["passages"] = build_passages(journal, out, deps, SEEDS["heldout"], overrides)
         elif stage == "prompts":
             stats["prompts"] = build_prompts(out, deps, author_questions(questions), SEEDS["prompts"])
         elif stage == "render":
@@ -852,7 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     deps = real_deps(args.model)
     try:
-        build(args.out or OUT, deps, args.journal, args.voice, args.questions, args.fdb, stages)
+        build(args.out or OUT, deps, args.journal, args.voice, args.questions, args.fdb, stages, overrides=OVERRIDES)
     finally:
         from shared import teacher
 

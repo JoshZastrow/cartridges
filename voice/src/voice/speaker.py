@@ -15,13 +15,10 @@ Sources:
   (`convert_backbone`, `WavLMEcapaTdnn`) from huggingface/open-tts-leaderboard
   `transformers/score_similarity.py` at 1645e63016f0556e69cbd4850c95d7cb95943877
   (Apache-2.0), reported bit-exact against upstream.
-- Not vendored: the ECAPA-TDNN head classes (Res2Conv1dReluBn, Conv1dReluBn,
-  SE_Connect, SE_Res2Block, AttentiveStatsPool) from microsoft/UniSpeech
-  `downstreams/speaker_verification/models/ecapa_tdnn.py` at commit
-  40ac183e772abdcbf3a318eccffaa70c0cfd3a74, CC BY-SA 3.0 (Microsoft,
-  UniSpeech authors). `load_head` downloads that file once into VOICE_CACHE,
-  checks its sha256 (HEAD_SHA256) before every load, and executes only those
-  five class definitions (not the file's imports of torchaudio and s3prl).
+- The ECAPA-TDNN head classes (Res2Conv1dReluBn, Conv1dReluBn, SE_Connect,
+  SE_Res2Block, AttentiveStatsPool): `voice.vendor.ecapa_tdnn`, microsoft/UniSpeech
+  at 40ac183e772abdcbf3a318eccffaa70c0cfd3a74, CC BY-SA 3.0, unmodified except
+  imports (see voice/src/voice/vendor/NOTICE).
 The checkpoint (CC BY-SA 3.0) is never committed; it is fetched from
 a Hub mirror pinned by the sha256 of the official file (CHECKPOINT_SHA256; the
 same digest on three independent mirrors), loaded with `weights_only=True`.
@@ -31,16 +28,13 @@ statistics, so padding would shift the embedding.
 
 from __future__ import annotations
 
-import ast
 import hashlib
-import os
-import types
-import urllib.request
-from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from voice.vendor.ecapa_tdnn import AttentiveStatsPool, Conv1dReluBn, SE_Res2Block
 
 CHECKPOINT_REPO = "bezzam/wavlm_large_finetune_seed_tts_eval"
 CHECKPOINT_FILE = "wavlm_large_finetune.pth"
@@ -48,51 +42,22 @@ CHECKPOINT_SHA256 = "51f07e3b94d9e0262a6a675ef5a087be3dd09e8c62e9d886827f44f82fe
 BACKBONE_CONFIG = "microsoft/wavlm-large"  # config.json only; every weight comes from the checkpoint
 MODEL_ID = f"wavlm-tdnn:{CHECKPOINT_FILE}@sha256:{CHECKPOINT_SHA256[:12]}"
 SAMPLE_RATE = 16000
-HEAD_COMMIT = "40ac183e772abdcbf3a318eccffaa70c0cfd3a74"
-HEAD_URL = (f"https://raw.githubusercontent.com/microsoft/UniSpeech/{HEAD_COMMIT}"
-            "/downstreams/speaker_verification/models/ecapa_tdnn.py")
-HEAD_SHA256 = "9571bb524980c1447d64c4fadaa31a4772d0ca1e9864d523c091ed600ff134e6"
-HEAD_CLASSES = ("Res2Conv1dReluBn", "Conv1dReluBn", "SE_Connect", "SE_Res2Block", "AttentiveStatsPool")
-CACHE = Path(os.environ.get("VOICE_CACHE", Path.home() / ".cache/voice"))
-
-
-def head_path() -> Path:
-    """UniSpeech's ecapa_tdnn.py at HEAD_COMMIT in VOICE_CACHE (downloaded once), digest-checked."""
-    path = CACHE / f"ecapa_tdnn-{HEAD_COMMIT[:12]}.py"
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(HEAD_URL, path)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != HEAD_SHA256:
-        raise RuntimeError(f"{path}: sha256 {digest} != {HEAD_SHA256}; refusing to execute it")
-    return path
-
-
-def load_head(path: Path | None = None) -> types.SimpleNamespace:
-    """The HEAD_CLASSES of the verified upstream file, defined against torch, nn and F only."""
-    tree = ast.parse((path or head_path()).read_text())
-    body = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in HEAD_CLASSES]
-    assert {n.name for n in body} == set(HEAD_CLASSES), [n.name for n in body]
-    scope = {"torch": torch, "nn": nn, "F": F}
-    exec(compile(ast.Module(body=body, type_ignores=[]), str(path or HEAD_URL), "exec"), scope)  # noqa: S102
-    return types.SimpleNamespace(**{name: scope[name] for name in HEAD_CLASSES})
 
 
 class WavLMEcapaTdnn(nn.Module):
-    """UniSpeech `ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wavlm_large')` over an HF `WavLMModel`;
-    `head` holds the upstream head classes (`load_head`)."""
+    """UniSpeech `ECAPA_TDNN_SMALL(feat_dim=1024, feat_type='wavlm_large')` over an HF `WavLMModel`."""
 
-    def __init__(self, wavlm, head: types.SimpleNamespace, feat_dim=1024, channels=512, emb_dim=256):
+    def __init__(self, wavlm, feat_dim=1024, channels=512, emb_dim=256):
         super().__init__()
         self.wavlm = wavlm
         self.feature_weight = nn.Parameter(torch.zeros(1 + wavlm.config.num_hidden_layers))
         self.instance_norm = nn.InstanceNorm1d(feat_dim)
-        self.layer1 = head.Conv1dReluBn(feat_dim, channels, kernel_size=5, padding=2)
-        self.layer2 = head.SE_Res2Block(channels, channels, 3, 1, 2, 2, scale=8, se_bottleneck_dim=128)
-        self.layer3 = head.SE_Res2Block(channels, channels, 3, 1, 3, 3, scale=8, se_bottleneck_dim=128)
-        self.layer4 = head.SE_Res2Block(channels, channels, 3, 1, 4, 4, scale=8, se_bottleneck_dim=128)
+        self.layer1 = Conv1dReluBn(feat_dim, channels, kernel_size=5, padding=2)
+        self.layer2 = SE_Res2Block(channels, channels, 3, 1, 2, 2, scale=8, se_bottleneck_dim=128)
+        self.layer3 = SE_Res2Block(channels, channels, 3, 1, 3, 3, scale=8, se_bottleneck_dim=128)
+        self.layer4 = SE_Res2Block(channels, channels, 3, 1, 4, 4, scale=8, se_bottleneck_dim=128)
         self.conv = nn.Conv1d(channels * 3, 1536, kernel_size=1)
-        self.pooling = head.AttentiveStatsPool(1536, attention_channels=128)
+        self.pooling = AttentiveStatsPool(1536, attention_channels=128)
         self.bn = nn.BatchNorm1d(1536 * 2)
         self.linear = nn.Linear(1536 * 2, emb_dim)
 
@@ -192,7 +157,7 @@ class WavLMTdnn:
         backbone = WavLMModel(config)
         state = torch.load(path or checkpoint_path(), map_location="cpu", weights_only=True)["model"]
         backbone.load_state_dict(convert_backbone(state, set(backbone.state_dict())), strict=True)
-        model = WavLMEcapaTdnn(backbone, load_head(), feat_dim=config.hidden_size)
+        model = WavLMEcapaTdnn(backbone, feat_dim=config.hidden_size)
         head = {k: v for k, v in state.items() if not k.startswith(("feature_extract.", "loss_calculator."))}
         missing, unexpected = model.load_state_dict(head, strict=False)
         stray = [k for k in missing if not k.startswith("wavlm.")]

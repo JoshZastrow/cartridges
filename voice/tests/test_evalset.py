@@ -93,6 +93,26 @@ def test_classify_retries_once_then_excludes():
     assert counts["clean"] == 1 and counts["excluded"] == 2 and counts["topic/anger"] == 1
 
 
+def test_overrides_include_and_exclude(tmp_path):
+    ps = [P.Passage(passage_id=f"j-p001-0{i}", entry_date="2024-01-01", pages=[1], text="t", topic=t, borderline=b)
+          for i, (t, b) in enumerate([("sexuality", False), ("other", True), ("other", False), ("anger", True)])]
+    path = tmp_path / "passage_overrides.csv"
+    path.write_text('passage_id,entry_date,pages,topic,borderline,text,decision,note\n'
+                    'j-p001-00,2024-01-01,1,sexuality,false,"multi\nline",include,ok\n'
+                    'j-p001-01,2024-01-01,1,other,true,t,,\n'
+                    'j-p001-02,2024-01-01,1,other,false,t,Exclude,\n')
+    decisions = P.read_overrides(path)
+    assert decisions == {"j-p001-00": "include", "j-p001-02": "exclude"}
+    out = P.apply_overrides(ps, decisions)
+    assert [p.clean for p in out] == [True, False, False, False]
+    assert out[0].topic == "other" and out[1] == ps[1] and out[3] == ps[3]
+    with pytest.raises(ValueError, match="do not exist"):
+        P.apply_overrides(ps, {"nope-p001-00": "include"})
+    path.write_text("passage_id,decision\nj-p001-00,maybe\n")
+    with pytest.raises(ValueError, match="not one of"):
+        P.read_overrides(path)
+
+
 # ---------------------------------------------------------------- validators
 
 EARLY = P.Passage(passage_id="a-p001-00", entry_date="2022-03-01", pages=[1],
@@ -333,49 +353,17 @@ def test_convert_backbone_maps_original_names_and_rejects_unknown():
         speaker.convert_backbone({"feature_extract.model.bogus.weight": hf["masked_spec_embed"]}, set())
 
 
-def _stand_in_head():
-    """Minimal stand-ins with the upstream constructor signatures (not the upstream code)."""
-    import torch
-    from torch import nn
-
-    class Conv1dReluBn(nn.Conv1d):
-        def __init__(self, i, o, kernel_size=1, stride=1, padding=0, dilation=1, bias=True):
-            super().__init__(i, o, kernel_size, stride, padding, dilation, bias=bias)
-
-    class SE_Res2Block(nn.Conv1d):
-        def __init__(self, i, o, kernel_size, stride, padding, dilation, scale, se_bottleneck_dim):
-            super().__init__(i, o, kernel_size, stride, padding, dilation)
-
-    class AttentiveStatsPool(nn.Module):
-        def __init__(self, in_dim, attention_channels=128):
-            super().__init__()
-
-        def forward(self, x):
-            return torch.cat([x.mean(dim=2), x.std(dim=2)], dim=1)
-
-    return types.SimpleNamespace(Conv1dReluBn=Conv1dReluBn, SE_Res2Block=SE_Res2Block, AttentiveStatsPool=AttentiveStatsPool)
-
-
 def test_wavlm_tdnn_embeds_one_clip_to_a_unit_vector():
     import torch
 
     from voice import speaker
 
     torch.manual_seed(0)
-    emb = speaker.WavLMTdnn(speaker.WavLMEcapaTdnn(_tiny_wavlm(), _stand_in_head(), feat_dim=32, channels=16, emb_dim=8))
+    emb = speaker.WavLMTdnn(speaker.WavLMEcapaTdnn(_tiny_wavlm(), feat_dim=32, channels=16, emb_dim=8))
     x = np.random.default_rng(0).standard_normal(8000).astype(np.float32)
     a, b = emb(x), emb(np.random.default_rng(1).standard_normal(8000).astype(np.float32))
     assert a.shape == (8,) and float(torch.linalg.norm(a)) == pytest.approx(1.0, abs=1e-5)
     assert torch.allclose(a, emb(x)) and not torch.allclose(a, b)
-
-
-def test_head_is_refused_unless_its_hash_matches(tmp_path, monkeypatch):
-    from voice import speaker
-
-    monkeypatch.setattr(speaker, "CACHE", tmp_path)
-    (tmp_path / f"ecapa_tdnn-{speaker.HEAD_COMMIT[:12]}.py").write_text("import os  # tampered\n")
-    with pytest.raises(RuntimeError, match="refusing"):
-        speaker.head_path()
 
 
 def test_cli_delegates_evalset(monkeypatch):
