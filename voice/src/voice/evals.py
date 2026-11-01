@@ -855,13 +855,16 @@ def profile(recs: list[dict], batches: list[dict]) -> dict:
             "stages": {k: v | {"per_item_s": v["s"] / v["n"] if v["n"] else None} for k, v in stages.items()}}
 
 
-def gpu_cost(recs: list[dict], concurrency: int) -> dict:
-    """Billed endpoint time: every conversation's wall time (handshake included), plus
-    one cold start and one idle scale-down window per container."""
+def gpu_cost(recs: list[dict], concurrency: int, judge_s: float = 0.0) -> dict:
+    """Billed H200 time: the endpoint's (every conversation's wall time, handshake and cold
+    start included, plus one idle scale-down window per container) and the Qwen judge's
+    (its calls, cold start included; `teacher.stop()` ends it right after)."""
     busy = sum(r["wall_s"] for r in recs)
     containers = max(1, min(concurrency, len(recs)))
-    hours = (busy + containers * SCALEDOWN_S) / 3600
-    return {"gpu_hours": hours, "usd": hours * H200_USD_PER_HOUR, "busy_s": busy, "containers": containers}
+    endpoint_h = (busy + containers * SCALEDOWN_S) / 3600
+    hours = endpoint_h + judge_s / 3600
+    return {"gpu_hours": hours, "usd": hours * H200_USD_PER_HOUR, "endpoint_gpu_hours": endpoint_h,
+            "judge_gpu_hours": judge_s / 3600, "busy_s": busy, "containers": containers}
 
 
 def default_side_by_side(es: EvalSet) -> list[str]:
@@ -897,8 +900,11 @@ def log_wandb(cfg: EvalConfig, es: EvalSet, report: dict, recs: list[dict], out:
     from shared import tracking
 
     tag = "check" if cfg.check else "baseline" if cfg.system == "stock" else "candidate"
-    with tracking.start_run("voice", cfg.group, report["config"], name=cfg.run_name, job_type="eval", gpu="CPU",
-                            tags=[tag, cfg.backend]) as run:
+    # cost/* (written by TrackedRun at finish from its clock) = the billed H200 seconds of the eval, not this
+    # process's wall clock: the clock reads 0 at start and the billed total afterwards.
+    billed = iter([0.0, report["cost"]["gpu_hours"] * 3600])
+    with tracking.start_run("voice", cfg.group, report["config"], name=cfg.run_name, job_type="eval", gpu="H200",
+                            tags=[tag, cfg.backend], clock=lambda: next(billed, report["cost"]["gpu_hours"] * 3600)) as run:
         if not cfg.dry_run:
             run.run.use_artifact(f"conle-ai/voice/{cfg.evalset}" if "/" not in cfg.evalset else cfg.evalset)
         cols = ["metric", "value", "ci_low", "ci_high", "n"]
@@ -906,7 +912,7 @@ def log_wandb(cfg: EvalConfig, es: EvalSet, report: dict, recs: list[dict], out:
         run.summary.update({k: report["rows"][k]["value"] for k in report["rows"]})
         run.summary.update({f"{k}_ci": [report["rows"][k]["ci_low"], report["rows"][k]["ci_high"]]
                             for k in report["rows"]})
-        run.summary.update({f"cost/{k}": v for k, v in report["cost"].items()})
+        run.summary.update({f"cost/{k}": v for k, v in report["cost"].items() if k not in ("gpu_hours", "usd")})
         by_id = {r["id"]: r for r in recs}
         sbs = [p for p in report["config"]["side_by_side"] if p in by_id]
         rows = []
@@ -959,7 +965,8 @@ def evaluate(cfg: EvalConfig, es: EvalSet, deps: Deps) -> dict:
         "side_by_side": side_by_side, "naturalness_pairs": naturalness_pairs(es, seed=cfg.seed),
         "dry_run": cfg.dry_run,
     }
-    report = {"config": config, "rows": rows, "cost": gpu_cost(recs, cfg.concurrency) | {"wall_s": talk_s},
+    judge_s = sum(b["s"] for b in prof if b["span"].startswith("judge"))
+    report = {"config": config, "rows": rows, "cost": gpu_cost(recs, cfg.concurrency, judge_s) | {"wall_s": talk_s},
               "profile": profile(recs, prof),
               "items": [{k: r[k] for k in ("id", "kind", "transport_s", "scores")} for r in recs]}
     (out / "report.json").write_text(json.dumps(report, indent=1, default=float) + "\n")

@@ -285,8 +285,9 @@ def test_evaluate_dry_run_and_resume(dry, tmp_path):
 
 
 def test_gpu_cost_counts_containers_and_idle():
-    c = E.gpu_cost([{"wall_s": 1800.0}, {"wall_s": 1800.0}], concurrency=4)
-    assert c["containers"] == 2 and c["gpu_hours"] == pytest.approx(1 + 2 * E.SCALEDOWN_S / 3600)
+    c = E.gpu_cost([{"wall_s": 1800.0}, {"wall_s": 1800.0}], concurrency=4, judge_s=360.0)
+    assert c["containers"] == 2 and c["endpoint_gpu_hours"] == pytest.approx(1 + 2 * E.SCALEDOWN_S / 3600)
+    assert c["gpu_hours"] == pytest.approx(c["endpoint_gpu_hours"] + 0.1)
     assert c["usd"] == pytest.approx(c["gpu_hours"] * E.H200_USD_PER_HOUR)
 
 
