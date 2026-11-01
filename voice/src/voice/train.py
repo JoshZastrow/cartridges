@@ -245,6 +245,7 @@ image = (
         "huggingface-hub==1.32.0",
         "sounddevice==0.5.0",
         "sphn==0.1.12",
+        "pyloudnorm==0.2.0", "scipy==1.18.1",  # the fork's normalize_audio, for a .wav voice_prompt (#9)
         pre=True,
     )
     .uv_pip_install(FORK, extra_options="--no-deps")
